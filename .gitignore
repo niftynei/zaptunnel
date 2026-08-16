@@ -1,0 +1,14 @@
+/.direnv/
+/.nix/
+/result
+/result-*
+
+# Elixir
+**/_build/
+**/deps/
+erl_crash.dump
+
+# Node
+**/node_modules/
+**/dist/
+/.pnpm-store/

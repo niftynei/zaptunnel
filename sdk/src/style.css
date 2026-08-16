@@ -1,0 +1,60 @@
+:root {
+  color: #f6f3ea;
+  background: #12110f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  box-sizing: border-box;
+  max-width: 760px;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 64px 24px;
+}
+
+h1 {
+  color: #ffb000;
+}
+
+form {
+  display: grid;
+  gap: 18px;
+  margin: 36px 0;
+}
+
+label {
+  display: grid;
+  gap: 7px;
+}
+
+input,
+button {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid #49453d;
+  border-radius: 6px;
+  padding: 12px;
+  color: inherit;
+  background: #1d1b18;
+  font: inherit;
+}
+
+button {
+  border-color: #ffb000;
+  color: #12110f;
+  background: #ffb000;
+  cursor: pointer;
+}
+
+pre {
+  min-height: 80px;
+  overflow: auto;
+  border: 1px solid #49453d;
+  border-radius: 6px;
+  padding: 16px;
+  white-space: pre-wrap;
+}

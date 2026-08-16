@@ -1,0 +1,24 @@
+import Config
+
+config :zaptunnel_relay,
+  enabled: true,
+  ip: {127, 0, 0, 1},
+  port: 4000,
+  allow_private_addresses: false,
+  ticket_ttl_ms: 10_000,
+  free_sessions_per_node: 3,
+  max_total_sessions: 10_000,
+  connect_timeout_ms: 5_000,
+  dns_timeout_ms: 2_000,
+  endpoint_probe_module: ZaptunnelRelay.EndpointProbe,
+  verification_timeout_ms: 5_000,
+  verification_success_ttl_ms: 600_000,
+  verification_failure_ttl_ms: 15_000,
+  max_pending_verifications: 128,
+  rate_limit_burst: 5,
+  rate_limit_refill_ms: 1_000,
+  max_websocket_frame_bytes: 65_569,
+  session_idle_timeout_ms: 300_000,
+  tls: false
+
+import_config "#{config_env()}.exs"
