@@ -21,6 +21,17 @@ defmodule ZaptunnelRelay.MetricsTest do
 
     Telemetry.emit([:admission, :request], %{count: 1}, %{result: :ok})
     Telemetry.emit([:verification, :stop], %{duration_ms: 250}, %{result: :ok})
+
+    Telemetry.emit(
+      [:verification, :stop],
+      %{duration_ms: 50},
+      %{
+        result: {:error, :endpoint_unverified},
+        failure_stage: :ping,
+        failure_reason: :message_limit
+      }
+    )
+
     Telemetry.emit([:session, :start], %{count: 1})
 
     Telemetry.emit(
@@ -33,7 +44,13 @@ defmodule ZaptunnelRelay.MetricsTest do
 
     assert body =~ ~s(zaptunnel_admission_requests_total{result="accepted"} 1)
     assert body =~ ~s(zaptunnel_endpoint_verifications_total{result="success"} 1)
-    assert body =~ "zaptunnel_endpoint_verification_duration_seconds_sum 0.25"
+    assert body =~ ~s(zaptunnel_endpoint_verifications_total{result="failure"} 1)
+
+    assert body =~
+             ~s(zaptunnel_endpoint_verification_failures_total{stage="ping",reason="message_limit"} 1)
+
+    refute body =~ ~s(zaptunnel_endpoint_verification_failures_total{stage="",reason=""})
+    assert body =~ "zaptunnel_endpoint_verification_duration_seconds_sum 0.3"
     assert body =~ "zaptunnel_sessions_started_total 1"
     assert body =~ ~s(zaptunnel_sessions_ended_total{reason="normal"} 1)
     assert body =~ ~s(zaptunnel_forwarded_bytes_total{direction="browser_to_node"} 12)

@@ -2,14 +2,16 @@ defmodule ZaptunnelRelay.EndpointVerifier do
   @moduledoc false
 
   use GenServer
+  require Logger
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def verify(node_id, address) do
+  def verify(node_id, address, opts \\ []) do
     timeout = Application.fetch_env!(:zaptunnel_relay, :verification_timeout_ms)
-    GenServer.call(__MODULE__, {:verify, node_id, address}, timeout + 1_000)
+    request_id = Keyword.get(opts, :request_id)
+    GenServer.call(__MODULE__, {:verify, node_id, address, request_id}, timeout + 1_000)
   end
 
   def reset, do: GenServer.call(__MODULE__, :reset)
@@ -18,13 +20,14 @@ defmodule ZaptunnelRelay.EndpointVerifier do
   def init(_opts), do: {:ok, %{cache: %{}, pending: %{}}}
 
   @impl true
-  def handle_call({:verify, node_id, address}, from, state) do
+  def handle_call({:verify, node_id, address, request_id}, from, state) do
     key = {node_id, address}
     now = System.monotonic_time(:millisecond)
 
     case Map.get(state.cache, key) do
-      %{result: result, expires_at: expires_at} when expires_at > now ->
+      %{result: result, failure: failure, expires_at: expires_at} when expires_at > now ->
         ZaptunnelRelay.Telemetry.emit([:verification, :cache_hit], %{count: 1}, %{result: result})
+        maybe_log_failure(key, failure, 0, request_id, true)
         {:reply, result, state}
 
       _expired_or_missing ->
@@ -41,7 +44,7 @@ defmodule ZaptunnelRelay.EndpointVerifier do
               pending =
                 Map.put(state.pending, key, %{
                   task_ref: task.ref,
-                  waiters: [from],
+                  waiters: [%{from: from, request_id: request_id}],
                   started_at: now
                 })
 
@@ -49,7 +52,8 @@ defmodule ZaptunnelRelay.EndpointVerifier do
             end
 
           entry ->
-            pending = Map.put(state.pending, key, %{entry | waiters: [from | entry.waiters]})
+            waiter = %{from: from, request_id: request_id}
+            pending = Map.put(state.pending, key, %{entry | waiters: [waiter | entry.waiters]})
             {:noreply, %{state | pending: pending}}
         end
     end
@@ -68,20 +72,26 @@ defmodule ZaptunnelRelay.EndpointVerifier do
         {:noreply, state}
 
       {key, entry} ->
-        result = normalize(result)
-        Enum.each(entry.waiters, &GenServer.reply(&1, result))
-        ttl = cache_ttl(result)
         duration = System.monotonic_time(:millisecond) - entry.started_at
+        {result, failure} = normalize(result)
+
+        Enum.each(entry.waiters, fn waiter ->
+          maybe_log_failure(key, failure, duration, waiter.request_id, false)
+          GenServer.reply(waiter.from, result)
+        end)
+
+        ttl = cache_ttl(result)
 
         ZaptunnelRelay.Telemetry.emit(
           [:verification, :stop],
           %{duration_ms: duration},
-          %{result: result}
+          telemetry_metadata(result, failure)
         )
 
         cache =
           Map.put(state.cache, key, %{
             result: result,
+            failure: failure,
             expires_at: System.monotonic_time(:millisecond) + ttl
           })
 
@@ -96,14 +106,20 @@ defmodule ZaptunnelRelay.EndpointVerifier do
 
       {key, entry} ->
         result = {:error, :endpoint_unverified}
-        Enum.each(entry.waiters, &GenServer.reply(&1, result))
+        duration = System.monotonic_time(:millisecond) - entry.started_at
+        failure = {:internal, :task_exit}
+
+        Enum.each(entry.waiters, fn waiter ->
+          maybe_log_failure(key, failure, duration, waiter.request_id, false)
+          GenServer.reply(waiter.from, result)
+        end)
 
         ZaptunnelRelay.Telemetry.emit(
           [:verification, :stop],
           %{
-            duration_ms: System.monotonic_time(:millisecond) - entry.started_at
+            duration_ms: duration
           },
-          %{result: result}
+          telemetry_metadata(result, failure)
         )
 
         {:noreply, %{state | pending: Map.delete(state.pending, key)}}
@@ -114,8 +130,51 @@ defmodule ZaptunnelRelay.EndpointVerifier do
     Enum.find(pending, fn {_key, entry} -> entry.task_ref == reference end)
   end
 
-  defp normalize(:ok), do: :ok
-  defp normalize(_result), do: {:error, :endpoint_unverified}
+  defp normalize(:ok), do: {:ok, nil}
+
+  defp normalize({:error, {stage, reason}}) when is_atom(stage) and is_atom(reason),
+    do: {{:error, :endpoint_unverified}, {stage, reason}}
+
+  defp normalize({:error, reason}) when is_atom(reason),
+    do: {{:error, :endpoint_unverified}, {:probe, reason}}
+
+  defp normalize(_result),
+    do: {{:error, :endpoint_unverified}, {:probe, :error}}
+
+  defp telemetry_metadata(result, nil), do: %{result: result}
+
+  defp telemetry_metadata(result, {stage, reason}),
+    do: %{result: result, failure_stage: stage, failure_reason: reason}
+
+  defp maybe_log_failure(_key, nil, _duration, _request_id, _cached?), do: :ok
+
+  defp maybe_log_failure(
+         {node_id, {ip, port}},
+         {stage, reason},
+         duration,
+         request_id,
+         cached?
+       ) do
+    Logger.warning(
+      "endpoint verification failed request_id=#{format_request_id(request_id)} " <>
+        "stage=#{stage} reason=#{reason} cached=#{cached?} " <>
+        "node_id=#{abbreviate(node_id)} target=#{format_address(ip, port)} duration_ms=#{duration}"
+    )
+  end
+
+  defp format_request_id("zt_" <> rest = request_id) when byte_size(rest) == 16, do: request_id
+  defp format_request_id(_request_id), do: "internal"
+
+  defp abbreviate(<<prefix::binary-size(8), _middle::binary-size(50), suffix::binary-size(8)>>),
+    do: prefix <> "…" <> suffix
+
+  defp abbreviate(_node_id), do: "invalid"
+
+  defp format_address({_, _, _, _} = ip, port),
+    do: "#{:inet.ntoa(ip)}:#{port}"
+
+  defp format_address(ip, port),
+    do: "[#{:inet.ntoa(ip)}]:#{port}"
 
   defp cache_ttl(:ok),
     do: Application.fetch_env!(:zaptunnel_relay, :verification_success_ttl_ms)

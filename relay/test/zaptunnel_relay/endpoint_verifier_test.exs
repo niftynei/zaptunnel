@@ -1,6 +1,8 @@
 defmodule ZaptunnelRelay.EndpointVerifierTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias ZaptunnelRelay.EndpointVerifier
 
   defmodule Probe do
@@ -53,12 +55,36 @@ defmodule ZaptunnelRelay.EndpointVerifierTest do
   end
 
   test "normalizes and briefly caches probe failures" do
-    Application.put_env(:zaptunnel_relay, :probe_test_result, {:error, :connection_refused})
+    Application.put_env(
+      :zaptunnel_relay,
+      :probe_test_result,
+      {:error, {:tcp_connect, :econnrefused}}
+    )
 
-    assert {:error, :endpoint_unverified} = EndpointVerifier.verify(@node_id, @address)
+    log =
+      capture_log(fn ->
+        assert {:error, :endpoint_unverified} =
+                 EndpointVerifier.verify(@node_id, @address, request_id: "zt_abcdefghijklmnop")
+      end)
+
+    assert log =~ "endpoint verification failed"
+    assert log =~ "request_id=zt_abcdefghijklmnop"
+    assert log =~ "stage=tcp_connect"
+    assert log =~ "reason=econnrefused"
+    assert log =~ "cached=false"
+    assert log =~ "node_id=02111111…11111111"
+    assert log =~ "target=127.0.0.1:9735"
     assert_receive {:probe, @node_id, @address}
 
-    assert {:error, :endpoint_unverified} = EndpointVerifier.verify(@node_id, @address)
+    cached_log =
+      capture_log(fn ->
+        assert {:error, :endpoint_unverified} =
+                 EndpointVerifier.verify(@node_id, @address, request_id: "zt_qrstuvwxyzABCDEF")
+      end)
+
+    assert cached_log =~ "request_id=zt_qrstuvwxyzABCDEF"
+    assert cached_log =~ "stage=tcp_connect"
+    assert cached_log =~ "cached=true"
     refute_receive {:probe, _, _}
   end
 end

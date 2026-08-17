@@ -79,12 +79,20 @@ configuration. Telemetry events expose verification duration/results, cache
 hits, rate-limit rejections, and per-session duration and byte counts. Error details
 from a failed network probe are intentionally collapsed into
 `endpoint_unverified` so that the API is less useful as a scanning oracle.
+Every response carries an opaque `X-Request-ID`; error JSON repeats it as
+`request_id`. Private operator logs use that ID to correlate the admission
+outcome with a bounded verification stage and reason such as `tcp_connect /
+econnrefused`, `bolt8_handshake / authentication_failed`, `init / timeout`, or
+`ping / message_limit`. Submitted addresses are escaped before logging, node
+IDs are abbreviated, and runes, RPC payloads, Lightning packets, and browser
+credentials are never logged.
 
 The relay serves Prometheus text exposition at `/metrics`. It reports
 aggregate admission outcomes, rate-limit rejections, endpoint verification
 results and duration, pending and active slots, session lifecycle, and byte
 counts. Node IDs and addresses are never Prometheus labels: they would leak
 routing metadata and create an attacker-controlled cardinality problem.
+Verification failure metrics use only bounded `stage` and `reason` labels.
 
 ## Free connection limit
 

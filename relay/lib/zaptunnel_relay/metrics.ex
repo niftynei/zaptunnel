@@ -56,6 +56,7 @@ defmodule ZaptunnelRelay.Metrics do
       admission: %{},
       rate_limited: 0,
       verification: %{},
+      verification_failures: %{},
       verification_cache: %{},
       verification_duration_ms: 0,
       verification_duration_count: 0,
@@ -81,10 +82,20 @@ defmodule ZaptunnelRelay.Metrics do
   end
 
   defp record(state, [:zaptunnel_relay, :verification, :stop], measurements, metadata) do
-    state
-    |> update_in([:verification], &increment(&1, result_label(metadata[:result])))
-    |> Map.update!(:verification_duration_ms, &(&1 + measurements[:duration_ms]))
-    |> Map.update!(:verification_duration_count, &(&1 + 1))
+    state =
+      state
+      |> update_in([:verification], &increment(&1, result_label(metadata[:result])))
+      |> Map.update!(:verification_duration_ms, &(&1 + measurements[:duration_ms]))
+      |> Map.update!(:verification_duration_count, &(&1 + 1))
+
+    case {metadata[:failure_stage], metadata[:failure_reason]} do
+      {stage, reason}
+      when is_atom(stage) and not is_nil(stage) and is_atom(reason) and not is_nil(reason) ->
+        update_in(state.verification_failures, &increment(&1, {stage, reason}))
+
+      _success_or_legacy_event ->
+        state
+    end
   end
 
   defp record(state, [:zaptunnel_relay, :session, :start], _measurements, _metadata) do
@@ -131,6 +142,12 @@ defmodule ZaptunnelRelay.Metrics do
       sample("zaptunnel_rate_limited_total", metrics.rate_limited),
       help("zaptunnel_endpoint_verifications_total", "Endpoint verification results", "counter"),
       labelled("zaptunnel_endpoint_verifications_total", "result", metrics.verification),
+      help(
+        "zaptunnel_endpoint_verification_failures_total",
+        "Endpoint verification failures by bounded internal reason",
+        "counter"
+      ),
+      failure_labels(metrics.verification_failures),
       help(
         "zaptunnel_endpoint_verification_cache_hits_total",
         "Endpoint verification cache hits",
@@ -185,6 +202,17 @@ defmodule ZaptunnelRelay.Metrics do
     values
     |> Enum.sort()
     |> Enum.map(fn {value, count} -> sample(~s(#{name}{#{label}="#{value}"}), count) end)
+  end
+
+  defp failure_labels(values) do
+    values
+    |> Enum.sort()
+    |> Enum.map(fn {{stage, reason}, count} ->
+      sample(
+        ~s(zaptunnel_endpoint_verification_failures_total{stage="#{stage}",reason="#{reason}"}),
+        count
+      )
+    end)
   end
 
   defp sample(name, value), do: [name, " ", to_string(value), "\n"]

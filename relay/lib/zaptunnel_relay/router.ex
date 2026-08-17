@@ -2,6 +2,7 @@ defmodule ZaptunnelRelay.Router do
   @moduledoc false
 
   use Plug.Router
+  require Logger
 
   @static_opts Plug.Static.init(
                  at: "/",
@@ -10,6 +11,7 @@ defmodule ZaptunnelRelay.Router do
                  only: ~w(assets favicon.svg)
                )
 
+  plug(:request_id)
   plug(:surface)
   plug(:static)
   plug(:cors)
@@ -47,13 +49,20 @@ defmodule ZaptunnelRelay.Router do
   end
 
   post "/v1/connections" do
+    request_id = conn.assigns.zaptunnel_request_id
+    submitted_node_id = conn.body_params["node_id"]
+    submitted_address = conn.body_params["address"]
+
     relay_only(conn, fn conn ->
       result =
         with :ok <- ZaptunnelRelay.RateLimiter.check(conn.remote_ip),
-             {:ok, node_id} <- validate_node_id(conn.body_params["node_id"]),
-             {:ok, parsed} <- ZaptunnelRelay.Address.parse(conn.body_params["address"]),
+             {:ok, node_id} <- validate_node_id(submitted_node_id),
+             {:ok, parsed} <- ZaptunnelRelay.Address.parse(submitted_address),
              {:ok, pinned_address} <- resolve(parsed),
-             :ok <- ZaptunnelRelay.EndpointVerifier.verify(node_id, pinned_address),
+             :ok <-
+               ZaptunnelRelay.EndpointVerifier.verify(node_id, pinned_address,
+                 request_id: request_id
+               ),
              {:ok, ticket} <- ZaptunnelRelay.Admission.issue(node_id, pinned_address) do
           {:ok, ticket}
         end
@@ -61,6 +70,8 @@ defmodule ZaptunnelRelay.Router do
       ZaptunnelRelay.Telemetry.emit([:admission, :request], %{count: 1}, %{
         result: result_tag(result)
       })
+
+      log_admission(request_id, result, submitted_node_id, submitted_address)
 
       case result do
         {:ok, ticket} -> json(conn, 201, %{websocket_path: "/v1/connect/#{ticket}"})
@@ -97,6 +108,14 @@ defmodule ZaptunnelRelay.Router do
     |> put_resp_header("access-control-allow-origin", "*")
     |> put_resp_header("access-control-allow-headers", "content-type")
     |> put_resp_header("access-control-allow-methods", "GET,POST,OPTIONS")
+  end
+
+  defp request_id(conn, _opts) do
+    request_id = "zt_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+
+    conn
+    |> assign(:zaptunnel_request_id, request_id)
+    |> put_resp_header("x-request-id", request_id)
   end
 
   defp surface(conn, _opts) do
@@ -179,7 +198,53 @@ defmodule ZaptunnelRelay.Router do
   defp result_tag({:ok, _ticket}), do: :ok
   defp result_tag({:error, reason}), do: {:error, reason}
 
+  defp log_admission(request_id, {:ok, _ticket}, node_id, address) do
+    Logger.info(
+      "admission accepted request_id=#{request_id} node_id=#{abbreviate_node_id(node_id)} " <>
+        "submitted_address=#{inspect_submitted(address)}"
+    )
+  end
+
+  defp log_admission(request_id, {:error, reason}, node_id, address) do
+    Logger.warning(
+      "admission rejected request_id=#{request_id} stage=#{admission_stage(reason)} " <>
+        "reason=#{safe_reason(reason)} node_id=#{abbreviate_node_id(node_id)} " <>
+        "submitted_address=#{inspect_submitted(address)}"
+    )
+  end
+
+  defp admission_stage(:rate_limited), do: :rate_limit
+  defp admission_stage(:connection_limit), do: :quota
+  defp admission_stage(:relay_overloaded), do: :capacity
+  defp admission_stage(:endpoint_unverified), do: :verification
+  defp admission_stage(:non_public_address), do: :address_policy
+  defp admission_stage(reason) when reason in [:invalid_node_id, :invalid_address], do: :input
+  defp admission_stage(reason) when reason in [:dns_timeout, :nxdomain, :eai_again], do: :dns
+  defp admission_stage(_reason), do: :admission
+
+  defp safe_reason(reason) when is_atom(reason), do: reason
+  defp safe_reason(_reason), do: :error
+
+  defp abbreviate_node_id(<<prefix::binary-size(8), _::binary-size(50), suffix::binary-size(8)>>),
+    do: prefix <> "…" <> suffix
+
+  defp abbreviate_node_id(_node_id), do: "invalid"
+
+  defp inspect_submitted(value) when is_binary(value),
+    do: inspect(value, printable_limit: 128, limit: 10)
+
+  defp inspect_submitted(_value), do: "invalid"
+
   defp json(conn, status, body) do
+    body =
+      case {body, conn.assigns[:zaptunnel_request_id]} do
+        {%{error: _error}, request_id} when is_binary(request_id) ->
+          Map.put_new(body, :request_id, request_id)
+
+        _success_or_unidentified ->
+          body
+      end
+
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(status, Jason.encode!(body))

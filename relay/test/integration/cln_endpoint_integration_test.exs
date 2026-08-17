@@ -12,7 +12,7 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
 
     assert :ok = EndpointProbe.verify(node_id, address, timeout: 5_000)
 
-    assert {:error, :endpoint_unverified} =
+    assert {:error, {:bolt8_handshake, _reason}} =
              EndpointProbe.verify(@wrong_node_id, address, timeout: 2_000)
   end
 
