@@ -214,19 +214,20 @@
 
   <section class="sdk-section" id="sdk">
     <div class="section-heading">
-      <div><span class="section-number">02 / BUILD WITH IT</span><h2>Three fields. One connection.</h2></div>
-      <p>The same SDK powers the demo above. Import it into any browser app and keep the Lightning details behind a familiar API.</p>
+      <div><span class="section-number">02 / BUILD WITH IT</span><h2>Three fields. One resilient connection.</h2></div>
+      <p>The same SDK powers the demo above. Its connection manager recovers from relay restarts, network changes, and mobile browser suspension.</p>
     </div>
     <div class="code-window">
       <div class="code-tabs"><span>TypeScript</span><small>@zaptunnel/sdk</small></div>
-      <pre><code><span class="keyword">import</span> {'{ connect }'} <span class="keyword">from</span> <span class="green">"@zaptunnel/sdk"</span>;
+      <pre><code><span class="keyword">import</span> {'{ createConnectionManager }'} <span class="keyword">from</span> <span class="green">"@zaptunnel/sdk"</span>;
 
-<span class="keyword">const</span> node = <span class="keyword">await</span> connect({'{'}
+<span class="keyword">const</span> node = createConnectionManager({'{'}
   nodeId: <span class="green">"02abc…"</span>,
   address: <span class="green">"node.example.com:9735"</span>,
   rune: getinfoRune
 {'}'});
 
+<span class="keyword">await</span> node.start();
 <span class="keyword">const</span> info = <span class="keyword">await</span> node.getinfo();</code></pre>
     </div>
     <div class="sdk-resources" aria-label="SDK documentation links">

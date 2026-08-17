@@ -1,4 +1,4 @@
-import { connect, ZaptunnelRpcError } from "../dist/lib/index.js";
+import { createConnectionManager, ZaptunnelRpcError } from "../dist/lib/index.js";
 
 const [relay, nodeId, address, rune] = process.argv.slice(2);
 
@@ -7,9 +7,16 @@ if (!relay || !nodeId || !address || !rune) {
   process.exit(2);
 }
 
-const node = await connect({ relay, nodeId, address, rune });
+const node = createConnectionManager({
+  relay,
+  nodeId,
+  address,
+  rune,
+  retry: { minDelayMs: 0, maxDelayMs: 10, jitter: 0 }
+});
 
 try {
+  const firstClient = await node.start();
   const info = await node.getInfo();
 
   if (!info || info.id !== nodeId) {
@@ -27,12 +34,34 @@ try {
     if (!(error instanceof ZaptunnelRpcError) || error.code !== "rpc_timeout") throw error;
   }
 
+  firstClient.disconnect();
+
+  for (let attempt = 0; attempt < 100 && node.currentClient === firstClient; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  if (node.currentClient === firstClient) {
+    throw new Error("connection manager did not observe the forced disconnect");
+  }
+
+  const replacementClient = await node.start();
+  const reconnectedInfo = await node.getInfo();
+
+  if (replacementClient === firstClient || reconnectedInfo.id !== nodeId) {
+    throw new Error("connection manager did not establish a fresh working session");
+  }
+
+  if (replacementClient.publicKey !== firstClient.publicKey) {
+    throw new Error("connection manager did not preserve its browser BOLT-8 identity");
+  }
+
   console.log(JSON.stringify({
     nodeId: info.id,
-    browserPeerId: node.publicKey,
+    browserPeerId: firstClient.publicKey,
     clnVersion: capabilities.versionRaw,
-    waitAnyInvoice: true
+    waitAnyInvoice: true,
+    reconnected: true
   }));
 } finally {
-  node.disconnect();
+  node.stop();
 }

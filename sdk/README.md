@@ -52,6 +52,7 @@ must authorize it.
 
 | SDK | Relay | Address support | Notable APIs |
 |---|---|---|---|
+| `0.4.x` | Current relay recommended | Clearnet and v3 onion | Resilient connection manager and all `0.3.x` features |
 | `0.3.x` | Current relay recommended | Clearnet and v3 onion | Request IDs, connection status, gossip suppression, paid-invoice iterator |
 | `0.2.x` | Initial public relay | Clearnet | Generic RPC calls, capability/version gates, paid-invoice iterator |
 | `0.1.x` | Initial public relay | Clearnet | Generic RPC calls |
@@ -62,9 +63,80 @@ addresses require a relay configured with Tor. Because CLN plugins and RPC
 methods vary independently of the core version, use `getCapabilities()` before
 depending on optional methods.
 
+## Resilient connections
+
+Use a connection manager for long-lived web and mobile applications. Every
+retry requests fresh relay admission and creates a new BOLT-8 session; this is
+required because a relay WebSocket ticket is single-use.
+
+```ts
+import { createConnectionManager } from "@zaptunnel/sdk";
+
+const node = createConnectionManager({
+  nodeId,
+  address,
+  rune,
+  retry: {
+    minDelayMs: 1_000,
+    maxDelayMs: 30_000,
+    jitter: 0.2
+  },
+  identityStore: {
+    loadPrivateKey: (id) => localStorage.getItem(`zaptunnel:${id}:node-key`) ?? undefined,
+    savePrivateKey: (id, key) => localStorage.setItem(`zaptunnel:${id}:node-key`, key)
+  }
+});
+
+const stopWatching = node.onConnectionStatus((status) => {
+  // idle | connecting | connected | waiting_reconnect | failed | stopped
+  renderConnectionState(status);
+});
+
+await node.start();
+const info = await node.getinfo();
+
+// stop() is terminal for this manager instance.
+node.stop();
+stopWatching();
+```
+
+The default policy retries forever with exponential backoff, 20% jitter, and a
+30-second ceiling. The manager also retries promptly when the browser reports
+that it is online again or returns to the foreground. Set a finite
+`maxAttempts` when an application wants a terminal `failed` state; call
+`retryNow()` after that state to begin a fresh retry cycle.
+
+The identity store receives only the browser's BOLT-8 initiator private key.
+It never receives the rune. `localStorage` is convenient but readable by any
+script executing on the same origin, so applications with a stronger threat
+model should provide an encrypted or platform-backed store.
+
+Calls made through the manager wait for a connection, then execute exactly
+once. The manager deliberately does **not** replay `invoice`, `pay`, or any
+other RPC after an ambiguous connection failure. Application code must decide
+whether a particular operation is safe to retry.
+
+The manager's `paidInvoices()` iterator is reconnect-safe because CLN's
+`pay_index` is monotonic:
+
+```ts
+for await (const invoice of node.paidInvoices({
+  lastPayIndex: await loadPayIndex(),
+  signal: controller.signal
+})) {
+  await processInvoiceIdempotently(invoice);
+  await savePayIndex(invoice.pay_index);
+}
+```
+
+It carries the latest cursor into every replacement session. Persist the cursor
+after processing each invoice to recover across a reload or application
+restart; consumers should still be idempotent because a crash before saving can
+redeliver the last invoice.
+
 ### Gossip suppression
 
-After every BOLT-8 initialization (including automatic reconnects), the SDK
+After every BOLT-8 initialization (including manager-created replacement sessions), the SDK
 sends a BOLT 7 `gossip_timestamp_filter` with `first_timestamp = 0xffffffff`
 and `timestamp_range = 0`. Zaptunnel uses the connection for Commando rather
 than network routing, so it does not request relayed historical or ongoing
@@ -197,6 +269,8 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `rpc_failed` | Another CLN RPC failure |
 | `unsupported_method` | A capability requirement was not met |
 | `unsupported_cln_version` | A version requirement was not met |
+| `reconnect_exhausted` | A manager reached its configured finite attempt limit |
+| `manager_stopped` | An operation waited on a manager that was permanently stopped |
 
 Relay admission errors use the same base class. Current codes include
 `rate_limited`, `connection_limit`, `endpoint_unverified`, `onion_unavailable`,
@@ -217,7 +291,7 @@ try {
 }
 ```
 
-## Connection status
+## Single-session connection status
 
 Use the stable status callback to update UI or detect a lost connection without
 depending on `lnmessage` internals:
@@ -232,6 +306,7 @@ stopWatching();
 ```
 
 `node.requestId` identifies the admission/session that created this client.
+For resilient applications, prefer the manager status API documented above.
 
 ## Browser identity
 

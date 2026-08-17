@@ -63,7 +63,11 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
                rune
              ])
 
-    assert %{"nodeId" => ^node_id, "browserPeerId" => browser_peer_id} =
+    assert %{
+             "nodeId" => ^node_id,
+             "browserPeerId" => browser_peer_id,
+             "reconnected" => true
+           } =
              output |> String.trim() |> Jason.decode!()
 
     assert String.match?(browser_peer_id, ~r/^(02|03)[0-9a-f]{64}$/)

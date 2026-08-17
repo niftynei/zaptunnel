@@ -104,6 +104,12 @@ const info = await node.getinfo();
 node.disconnect();
 ```
 
+For long-lived browser or mobile applications, use the SDK's connection
+manager. It obtains a fresh admission ticket after network changes or relay
+restarts, preserves the browser's BOLT-8 identity, and resumes paid-invoice
+polling without replaying ordinary RPC calls. See
+[resilient connections](sdk/README.md#resilient-connections) in the SDK guide.
+
 See [the SDK README](sdk/README.md) for identity persistence, generic RPC
 calls, error handling, and local package installation. Before a public release,
 work through the automated and manual scenarios in the

@@ -1,6 +1,6 @@
 {
   "name": "@zaptunnel/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "End-to-end encrypted browser connections to Core Lightning through Zaptunnel",
   "license": "MIT",
   "homepage": "https://zapptunnel.com/#sdk",

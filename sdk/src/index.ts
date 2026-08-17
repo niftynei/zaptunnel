@@ -88,6 +88,34 @@ export type ZaptunnelConnectionStatus =
   | "disconnected"
   | "failed";
 
+export type ZaptunnelManagerStatus =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "waiting_reconnect"
+  | "failed"
+  | "stopped";
+
+export type ReconnectPolicy = {
+  /** First retry delay. Defaults to 1 second. */
+  minDelayMs?: number;
+  /** Maximum retry delay. Defaults to 30 seconds. */
+  maxDelayMs?: number;
+  /** Exponential multiplier. Defaults to 2. */
+  multiplier?: number;
+  /** Symmetric random variation from 0 through 1. Defaults to 0.2. */
+  jitter?: number;
+  /** Attempts per outage, including the first attempt. Defaults to unlimited. */
+  maxAttempts?: number;
+};
+
+export type ZaptunnelIdentityStore = {
+  /** Load a previously saved BOLT-8 initiator private key for this node. */
+  loadPrivateKey(nodeId: string): string | undefined | Promise<string | undefined>;
+  /** Save the generated BOLT-8 initiator private key. Runes are never passed here. */
+  savePrivateKey(nodeId: string, privateKey: string): void | Promise<void>;
+};
+
 export type ConnectOptions = {
   /** Public Zaptunnel relay origin, for example https://relay.zapptunnel.com. */
   relay?: string;
@@ -105,10 +133,15 @@ export type ConnectOptions = {
    * to Bitcoin mainnet. Set this for non-mainnet nodes that omit init networks.
    */
   chainHash?: string;
-  /** Disable automatic lnmessage reconnects by default for deterministic app lifecycle. */
+  /** @deprecated Relay tickets are single-use; use createConnectionManager() instead. */
   reconnect?: boolean;
   logger?: ZaptunnelLogger;
   signal?: AbortSignal;
+};
+
+export type ConnectionManagerOptions = Omit<ConnectOptions, "reconnect" | "signal"> & {
+  retry?: ReconnectPolicy;
+  identityStore?: ZaptunnelIdentityStore;
 };
 
 type AdmissionResponse = {
@@ -356,6 +389,8 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     privateKey: options.privateKey,
     logger: options.logger
   });
+  const abortConnection = () => transport.disconnect();
+  options.signal?.addEventListener("abort", abortConnection, { once: true });
 
   let gossipFilterError: unknown;
   const gossipSubscription = transport.decryptedMsgs$.subscribe((message) => {
@@ -380,7 +415,17 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
   });
 
   try {
-    const connected = await transport.connect(options.reconnect ?? false);
+    if (options.signal?.aborted) {
+      throw new ZaptunnelError("the Lightning connection attempt was aborted", {
+        code: "request_aborted",
+        requestId: admission.request_id
+      });
+    }
+
+    // A relay ticket can be redeemed only once. Reusing the same wsProxy URL
+    // through lnmessage's built-in reconnect can never establish a new relay
+    // session, so resilient reconnects belong to ZaptunnelConnectionManager.
+    const connected = await transport.connect(false);
 
     if (!connected) {
       throw new ZaptunnelError("the Lightning connection closed during its BOLT-8 handshake", {
@@ -413,7 +458,427 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
       requestId: admission.request_id,
       cause: error
     });
+  } finally {
+    options.signal?.removeEventListener("abort", abortConnection);
   }
+}
+
+type NormalizedReconnectPolicy = Required<ReconnectPolicy>;
+
+const DEFAULT_RECONNECT_POLICY: Readonly<NormalizedReconnectPolicy> = Object.freeze({
+  minDelayMs: 1_000,
+  maxDelayMs: 30_000,
+  multiplier: 2,
+  jitter: 0.2,
+  maxAttempts: Number.POSITIVE_INFINITY
+});
+
+type ConnectionWaiter = {
+  resolve(client: ZaptunnelClient): void;
+  reject(error: ZaptunnelError): void;
+};
+
+/**
+ * Owns a sequence of fresh, single-admission Lightning sessions.
+ *
+ * Ordinary RPC calls are delegated exactly once. Only connection setup and the
+ * cursor-based paid-invoice stream are automatically resumed.
+ */
+export class ZaptunnelConnectionManager {
+  readonly nodeId: string;
+  readonly address: string;
+
+  #options: Omit<ConnectOptions, "signal">;
+  #retry: NormalizedReconnectPolicy;
+  #identityStore?: ZaptunnelIdentityStore;
+  #privateKey?: string;
+  #savedPrivateKey?: string;
+  #identityLoaded = false;
+  #client: ZaptunnelClient | null = null;
+  #sessionAbort: AbortController | null = null;
+  #clientStatusCleanup?: () => void;
+  #attemptAbort: AbortController | null = null;
+  #attemptInFlight = false;
+  #attempts = 0;
+  #retryTimer?: ReturnType<typeof setTimeout>;
+  #started = false;
+  #stopped = false;
+  #status: ZaptunnelManagerStatus = "idle";
+  #lastError?: unknown;
+  #terminalError?: ZaptunnelError;
+  #listeners = new Set<(status: ZaptunnelManagerStatus) => void>();
+  #waiters = new Set<ConnectionWaiter>();
+  #onlineListener = () => this.retryNow();
+  #visibilityListener = () => {
+    if (typeof document === "undefined" || document.visibilityState === "visible") this.retryNow();
+  };
+
+  constructor(options: ConnectionManagerOptions) {
+    validateNodeId(options.nodeId);
+    parseAddress(options.address);
+    if (options.chainHash !== undefined) validateChainHash(options.chainHash);
+
+    const { retry, identityStore, ...connectionOptions } = options;
+    this.#retry = normalizeReconnectPolicy(retry);
+    this.#identityStore = identityStore;
+    this.#privateKey = options.privateKey;
+    this.nodeId = options.nodeId.toLowerCase();
+    this.#options = { ...connectionOptions, nodeId: this.nodeId, reconnect: false };
+    this.address = options.address;
+  }
+
+  get status(): ZaptunnelManagerStatus {
+    return this.#status;
+  }
+
+  get currentClient(): ZaptunnelClient | null {
+    return this.#client;
+  }
+
+  get privateKey(): string | undefined {
+    return this.#privateKey;
+  }
+
+  get publicKey(): string | undefined {
+    return this.#client?.publicKey;
+  }
+
+  get requestId(): string | undefined {
+    return this.#client?.requestId;
+  }
+
+  get lastError(): unknown {
+    return this.#lastError;
+  }
+
+  /** Start the lifecycle and resolve when the current session is connected. */
+  start(): Promise<ZaptunnelClient> {
+    return this.#waitForClient();
+  }
+
+  /** Stop permanently, cancel pending retries, and close the current session. */
+  stop(): void {
+    if (this.#stopped) return;
+
+    this.#stopped = true;
+    this.#clearRetryTimer();
+    this.#attemptAbort?.abort();
+    this.#attemptAbort = null;
+    this.#dropClient();
+    this.#detachBrowserLifecycle();
+    this.#setStatus("stopped");
+
+    const error = managerStoppedError();
+    for (const waiter of this.#waiters) waiter.reject(error);
+    this.#waiters.clear();
+  }
+
+  /** Retry immediately after an offline period or an exhausted finite policy. */
+  retryNow(): void {
+    if (!this.#started || this.#stopped || this.#client || this.#attemptInFlight) return;
+    if (!browserIsOnline()) return;
+
+    this.#terminalError = undefined;
+    this.#attempts = 0;
+    this.#scheduleReconnect(0, true);
+  }
+
+  /** Subscribe to manager lifecycle state. The current state is delivered immediately. */
+  onConnectionStatus(listener: (status: ZaptunnelManagerStatus) => void): () => void {
+    this.#listeners.add(listener);
+    this.#notifyListener(listener, this.#status);
+    return () => this.#listeners.delete(listener);
+  }
+
+  /** Invoke one RPC on one connected session. It is never replayed after failure. */
+  async call<T = unknown>(
+    method: string,
+    params: RpcParams = [],
+    options: RpcCallOptions = {}
+  ): Promise<T> {
+    const client = await this.#waitForClient(options.signal);
+    return await client.call<T>(method, params, options);
+  }
+
+  getInfo<T = GetInfoResponse>(options: RpcCallOptions = {}): Promise<T> {
+    return this.getinfo<T>(options);
+  }
+
+  getinfo<T = GetInfoResponse>(options: RpcCallOptions = {}): Promise<T> {
+    return this.call<T>("getinfo", [], options);
+  }
+
+  invoice<T = unknown>(params: Record<string, unknown>, options: RpcCallOptions = {}): Promise<T> {
+    return this.call<T>("invoice", params, options);
+  }
+
+  async getCapabilities(options: RpcCallOptions = {}): Promise<ClnCapabilities> {
+    const client = await this.#waitForClient(options.signal);
+    return await client.getCapabilities(options);
+  }
+
+  async waitAnyInvoice(options: WaitAnyInvoiceOptions = {}): Promise<PaidInvoice> {
+    const client = await this.#waitForClient(options.signal);
+    return await client.waitAnyInvoice(options);
+  }
+
+  /**
+   * Resume paid-invoice polling on every fresh session without losing the
+   * monotonic pay_index cursor. Persist each yielded cursor in application
+   * storage if recovery across a page reload is required.
+   */
+  async *paidInvoices(options: PaidInvoiceStreamOptions = {}): AsyncGenerator<PaidInvoice, void, void> {
+    let lastPayIndex = options.lastPayIndex ?? 0;
+    validateNonNegativeInteger(lastPayIndex, "lastPayIndex");
+
+    while (!this.#stopped && !options.signal?.aborted) {
+      let client: ZaptunnelClient;
+
+      try {
+        client = await this.#waitForClient(options.signal);
+      } catch (error) {
+        if (options.signal?.aborted || this.#stopped) return;
+        throw error;
+      }
+
+      const sessionAbort = this.#sessionAbort;
+      if (!sessionAbort) continue;
+      const linked = linkAbortSignals(options.signal, sessionAbort.signal);
+
+      try {
+        for await (const invoice of client.paidInvoices({
+          ...options,
+          lastPayIndex,
+          signal: linked.signal
+        })) {
+          lastPayIndex = invoice.pay_index;
+          yield invoice;
+        }
+      } catch (error) {
+        if (options.signal?.aborted || this.#stopped) return;
+        if (client !== this.#client || sessionAbort.signal.aborted) continue;
+        throw error;
+      } finally {
+        linked.cleanup();
+      }
+    }
+  }
+
+  /** Test seam for alternate transports; production always calls connect(). */
+  protected establishConnection(options: ConnectOptions): Promise<ZaptunnelClient> {
+    return connect(options);
+  }
+
+  async #attemptConnection(): Promise<void> {
+    if (this.#stopped || this.#client || this.#attemptInFlight) return;
+
+    if (!browserIsOnline()) {
+      this.#setStatus("waiting_reconnect");
+      return;
+    }
+
+    this.#attemptInFlight = true;
+    this.#attempts += 1;
+    this.#setStatus("connecting");
+    const controller = new AbortController();
+    this.#attemptAbort = controller;
+
+    try {
+      await this.#loadIdentity();
+      if (controller.signal.aborted) return;
+      const client = await this.establishConnection({
+        ...this.#options,
+        privateKey: this.#privateKey,
+        reconnect: false,
+        signal: controller.signal
+      });
+
+      if (this.#stopped) {
+        client.disconnect();
+        return;
+      }
+
+      this.#client = client;
+      this.#sessionAbort = new AbortController();
+      this.#attempts = 0;
+      this.#lastError = undefined;
+      this.#privateKey = client.privateKey;
+
+      this.#clientStatusCleanup = client.onConnectionStatus((status) => {
+        if (client !== this.#client) return;
+        if (status === "disconnected" || status === "failed") this.#handleConnectionLoss(client);
+      });
+
+      void this.#saveIdentity(client.privateKey);
+      this.#setStatus("connected");
+      for (const waiter of this.#waiters) waiter.resolve(client);
+      this.#waiters.clear();
+    } catch (error) {
+      if (this.#stopped || controller.signal.aborted) return;
+
+      this.#lastError = error;
+      if (this.#attempts >= this.#retry.maxAttempts) {
+        this.#terminalError = new ZaptunnelError("connection retry attempts were exhausted", {
+          code: "reconnect_exhausted",
+          requestId: error instanceof ZaptunnelError ? error.requestId : undefined,
+          cause: error
+        });
+        this.#setStatus("failed");
+        for (const waiter of this.#waiters) waiter.reject(this.#terminalError);
+        this.#waiters.clear();
+      } else {
+        const delay = calculateReconnectDelay(this.#attempts, this.#retry);
+        this.#setStatus("waiting_reconnect");
+        this.#scheduleReconnect(delay);
+      }
+    } finally {
+      if (this.#attemptAbort === controller) this.#attemptAbort = null;
+      this.#attemptInFlight = false;
+    }
+  }
+
+  #handleConnectionLoss(client: ZaptunnelClient): void {
+    if (client !== this.#client || this.#stopped) return;
+    this.#dropClient();
+    this.#attempts = 0;
+    this.#setStatus("waiting_reconnect");
+    this.#scheduleReconnect(this.#retry.minDelayMs);
+  }
+
+  #dropClient(): void {
+    const client = this.#client;
+    this.#client = null;
+    this.#clientStatusCleanup?.();
+    this.#clientStatusCleanup = undefined;
+    this.#sessionAbort?.abort();
+    this.#sessionAbort = null;
+    client?.disconnect();
+  }
+
+  #scheduleReconnect(delayMs: number, replace = false): void {
+    if (this.#stopped || this.#client) return;
+    if (replace) this.#clearRetryTimer();
+    if (this.#retryTimer !== undefined) return;
+
+    this.#retryTimer = setTimeout(() => {
+      this.#retryTimer = undefined;
+      void this.#attemptConnection();
+    }, delayMs);
+  }
+
+  #clearRetryTimer(): void {
+    if (this.#retryTimer !== undefined) clearTimeout(this.#retryTimer);
+    this.#retryTimer = undefined;
+  }
+
+  async #waitForClient(signal?: AbortSignal): Promise<ZaptunnelClient> {
+    if (this.#client) return this.#client;
+    if (this.#stopped) throw managerStoppedError();
+    if (this.#terminalError) throw this.#terminalError;
+    if (signal?.aborted) {
+      throw new ZaptunnelError("connection wait aborted", { code: "request_aborted" });
+    }
+
+    if (!this.#started) {
+      this.#started = true;
+      this.#attachBrowserLifecycle();
+      this.#scheduleReconnect(0);
+    }
+
+    return await new Promise<ZaptunnelClient>((resolve, reject) => {
+      const abort = () => {
+        this.#waiters.delete(waiter);
+        reject(new ZaptunnelError("connection wait aborted", { code: "request_aborted" }));
+      };
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      const waiter: ConnectionWaiter = {
+        resolve: (client) => {
+          cleanup();
+          resolve(client);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        }
+      };
+
+      this.#waiters.add(waiter);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  async #loadIdentity(): Promise<void> {
+    if (this.#identityLoaded) return;
+    this.#identityLoaded = true;
+    if (this.#privateKey || !this.#identityStore) return;
+
+    try {
+      this.#privateKey = await this.#identityStore.loadPrivateKey(this.nodeId);
+      this.#savedPrivateKey = this.#privateKey;
+    } catch (error) {
+      this.#options.logger?.warn(`Could not load the persisted Zaptunnel browser identity: ${safeMessage(error)}`);
+    }
+  }
+
+  async #saveIdentity(privateKey: string): Promise<void> {
+    if (!this.#identityStore || this.#savedPrivateKey === privateKey) return;
+
+    try {
+      await this.#identityStore.savePrivateKey(this.nodeId, privateKey);
+      this.#savedPrivateKey = privateKey;
+    } catch (error) {
+      this.#options.logger?.warn(`Could not save the Zaptunnel browser identity: ${safeMessage(error)}`);
+    }
+  }
+
+  #setStatus(status: ZaptunnelManagerStatus): void {
+    if (status === this.#status) return;
+    this.#status = status;
+    for (const listener of this.#listeners) this.#notifyListener(listener, status);
+  }
+
+  #notifyListener(
+    listener: (status: ZaptunnelManagerStatus) => void,
+    status: ZaptunnelManagerStatus
+  ): void {
+    try {
+      listener(status);
+    } catch (error) {
+      this.#options.logger?.error(`Zaptunnel connection-status listener failed: ${safeMessage(error)}`);
+    }
+  }
+
+  #attachBrowserLifecycle(): void {
+    globalThis.addEventListener?.("online", this.#onlineListener);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.#visibilityListener);
+    }
+  }
+
+  #detachBrowserLifecycle(): void {
+    globalThis.removeEventListener?.("online", this.#onlineListener);
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.#visibilityListener);
+    }
+  }
+}
+
+export function createConnectionManager(options: ConnectionManagerOptions): ZaptunnelConnectionManager {
+  return new ZaptunnelConnectionManager(options);
+}
+
+/** Calculate the jittered delay after a one-based consecutive failure count. */
+export function calculateReconnectDelay(
+  failureCount: number,
+  policy: ReconnectPolicy = {},
+  random: () => number = Math.random
+): number {
+  const normalized = normalizeReconnectPolicy(policy);
+  const exponent = Math.max(0, failureCount - 1);
+  const base = Math.min(normalized.maxDelayMs, normalized.minDelayMs * normalized.multiplier ** exponent);
+  const variation = base * normalized.jitter;
+  const jittered = base - variation + random() * variation * 2;
+  return Math.min(normalized.maxDelayMs, Math.max(0, Math.round(jittered)));
 }
 
 /** Encode a BOLT 7 filter that requests no relayed historical or future gossip. */
@@ -480,6 +945,13 @@ async function requestAdmission(
       signal: options.signal
     });
   } catch (error) {
+    if (options.signal?.aborted) {
+      throw new ZaptunnelError("the relay admission request was aborted", {
+        code: "request_aborted",
+        cause: error
+      });
+    }
+
     throw new ZaptunnelError("could not reach the Zaptunnel relay", {
       code: "relay_unreachable",
       cause: error
@@ -527,6 +999,75 @@ export function parseAddress(address: string): { host: string; port: number } {
   }
 
   return { host: parsed.hostname, port };
+}
+
+function normalizeReconnectPolicy(policy: ReconnectPolicy = {}): NormalizedReconnectPolicy {
+  const normalized = {
+    minDelayMs: policy.minDelayMs ?? DEFAULT_RECONNECT_POLICY.minDelayMs,
+    maxDelayMs: policy.maxDelayMs ?? DEFAULT_RECONNECT_POLICY.maxDelayMs,
+    multiplier: policy.multiplier ?? DEFAULT_RECONNECT_POLICY.multiplier,
+    jitter: policy.jitter ?? DEFAULT_RECONNECT_POLICY.jitter,
+    maxAttempts: policy.maxAttempts ?? DEFAULT_RECONNECT_POLICY.maxAttempts
+  };
+
+  if (!Number.isSafeInteger(normalized.minDelayMs) || normalized.minDelayMs < 0) {
+    throw invalidManagerOption("retry.minDelayMs must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(normalized.maxDelayMs) || normalized.maxDelayMs < normalized.minDelayMs) {
+    throw invalidManagerOption("retry.maxDelayMs must be a safe integer at least retry.minDelayMs");
+  }
+  if (!Number.isFinite(normalized.multiplier) || normalized.multiplier < 1) {
+    throw invalidManagerOption("retry.multiplier must be a finite number at least 1");
+  }
+  if (!Number.isFinite(normalized.jitter) || normalized.jitter < 0 || normalized.jitter > 1) {
+    throw invalidManagerOption("retry.jitter must be between 0 and 1");
+  }
+  if (
+    normalized.maxAttempts !== Number.POSITIVE_INFINITY &&
+    (!Number.isSafeInteger(normalized.maxAttempts) || normalized.maxAttempts < 1)
+  ) {
+    throw invalidManagerOption("retry.maxAttempts must be a positive safe integer or Infinity");
+  }
+
+  return normalized;
+}
+
+function invalidManagerOption(message: string): ZaptunnelError {
+  return new ZaptunnelError(message, { code: "invalid_option" });
+}
+
+function browserIsOnline(): boolean {
+  return typeof navigator === "undefined" || navigator.onLine !== false;
+}
+
+function managerStoppedError(): ZaptunnelError {
+  return new ZaptunnelError("the Zaptunnel connection manager is stopped", {
+    code: "manager_stopped"
+  });
+}
+
+function safeMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown error";
+}
+
+function linkAbortSignals(
+  ...signals: Array<AbortSignal | undefined>
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const active = signals.filter((signal): signal is AbortSignal => signal !== undefined);
+  const abort = () => controller.abort();
+
+  for (const signal of active) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const signal of active) signal.removeEventListener("abort", abort);
+    }
+  };
 }
 
 function parseRelay(relay: string): URL {

@@ -55,6 +55,8 @@ test("the SDK section links to package and authoritative developer documentation
   assert.match(app, /https:\/\/docs\.corelightning\.org\/reference\//);
   assert.match(app, /https:\/\/docs\.corelightning\.org\/reference\/createrune/);
   assert.match(app, /paidInvoices\(\)/);
+  assert.match(app, /createConnectionManager/);
+  assert.match(app, /One resilient connection/);
   assert.match(css, /\.sdk-resources\s*\{[^}]*grid-template-columns: repeat\(2/s);
 });
 

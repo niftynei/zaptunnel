@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   BITCOIN_MAINNET_CHAIN_HASH,
   ClnCapabilities,
+  calculateReconnectDelay,
   compareClnVersions,
   connect,
   encodeRestrictiveGossipTimestampFilter,
@@ -11,6 +12,7 @@ import {
   parseAddress,
   parseClnVersion,
   ZaptunnelClient,
+  ZaptunnelConnectionManager,
   ZaptunnelError,
   ZaptunnelRpcError
 } from "../dist/lib/index.js";
@@ -36,6 +38,251 @@ function clientWith(commando, rune = "default-rune") {
     { nodeId, address: "node.example.com:9735", rune: rune ?? undefined }
   );
 }
+
+class FakeManagedClient {
+  constructor({ privateKey = "44".repeat(32), call, invoices = [] } = {}) {
+    this.publicKey = "02" + "55".repeat(32);
+    this.privateKey = privateKey;
+    this.callImpl = call ?? (async () => ({}));
+    this.invoices = invoices;
+    this.listeners = new Set();
+    this.invoiceOptions = [];
+    this.disconnected = false;
+  }
+
+  onConnectionStatus(listener) {
+    this.listeners.add(listener);
+    listener("connected");
+    return () => this.listeners.delete(listener);
+  }
+
+  emit(status) {
+    for (const listener of this.listeners) listener(status);
+  }
+
+  disconnect() {
+    this.disconnected = true;
+  }
+
+  call(method, params, options) {
+    return this.callImpl(method, params, options);
+  }
+
+  getCapabilities() {
+    return Promise.resolve(new ClnCapabilities("v24.02", ["getinfo"]));
+  }
+
+  async *paidInvoices(options) {
+    this.invoiceOptions.push(options);
+    for (const invoice of this.invoices) yield invoice;
+
+    if (options.signal?.aborted) return;
+    await new Promise((resolve) => options.signal?.addEventListener("abort", resolve, { once: true }));
+  }
+}
+
+class FakeConnectionManager extends ZaptunnelConnectionManager {
+  constructor(options, connectionAttempts) {
+    super(options);
+    this.connectionAttempts = connectionAttempts;
+    this.receivedOptions = [];
+  }
+
+  async establishConnection(options) {
+    this.receivedOptions.push(options);
+    const attempt = this.connectionAttempts.shift();
+    if (attempt instanceof Error) throw attempt;
+    if (!attempt) throw new Error("unexpected connection attempt");
+    return attempt;
+  }
+}
+
+function paidInvoice(payIndex, label = `paid-${payIndex}`) {
+  return {
+    label,
+    payment_hash: "aa".repeat(32),
+    status: "paid",
+    pay_index: payIndex,
+    amount_received_msat: 1000,
+    paid_at: 1,
+    payment_preimage: "bb".repeat(32),
+    expires_at: 2
+  };
+}
+
+function managedOptions(overrides = {}) {
+  return {
+    nodeId,
+    address: "node.example.com:9735",
+    rune: "readonly",
+    retry: { minDelayMs: 0, maxDelayMs: 1, jitter: 0 },
+    ...overrides
+  };
+}
+
+test("reconnect delay is bounded exponential backoff with deterministic jitter", () => {
+  const policy = { minDelayMs: 100, maxDelayMs: 1_000, multiplier: 2, jitter: 0.25 };
+
+  assert.equal(calculateReconnectDelay(1, policy, () => 0.5), 100);
+  assert.equal(calculateReconnectDelay(3, policy, () => 0.5), 400);
+  assert.equal(calculateReconnectDelay(9, policy, () => 0.5), 1_000);
+  assert.equal(calculateReconnectDelay(9, policy, () => 1), 1_000);
+  assert.equal(calculateReconnectDelay(1, policy, () => 0), 75);
+  assert.equal(calculateReconnectDelay(1, policy, () => 1), 125);
+});
+
+test("manager retries with fresh sessions and preserves the generated browser identity", async () => {
+  const first = new FakeManagedClient({ privateKey: "66".repeat(32) });
+  const second = new FakeManagedClient({ privateKey: "66".repeat(32) });
+  const saves = [];
+  const manager = new FakeConnectionManager(
+    managedOptions({
+      identityStore: {
+        loadPrivateKey: async () => undefined,
+        savePrivateKey: async (savedNodeId, privateKey) => saves.push([savedNodeId, privateKey])
+      }
+    }),
+    [new Error("relay temporarily unavailable"), first, second]
+  );
+  const statuses = [];
+  manager.onConnectionStatus((status) => statuses.push(status));
+
+  assert.equal(await manager.start(), first);
+  assert.equal(manager.receivedOptions.length, 2);
+  assert.equal(manager.receivedOptions[0].reconnect, false);
+  assert.equal(manager.receivedOptions[0].privateKey, undefined);
+  assert.deepEqual(saves, [[nodeId, "66".repeat(32)]]);
+
+  first.emit("disconnected");
+  assert.equal(await manager.start(), second);
+  assert.equal(manager.receivedOptions.length, 3);
+  assert.equal(manager.receivedOptions[2].privateKey, "66".repeat(32));
+  assert.ok(statuses.includes("waiting_reconnect"));
+  assert.equal(statuses.at(-1), "connected");
+  manager.stop();
+});
+
+test("manager loads a persisted browser identity before first admission", async () => {
+  const storedKey = "77".repeat(32);
+  const client = new FakeManagedClient({ privateKey: storedKey });
+  let saves = 0;
+  const manager = new FakeConnectionManager(
+    managedOptions({
+      identityStore: {
+        loadPrivateKey: async (loadedNodeId) => {
+          assert.equal(loadedNodeId, nodeId);
+          return storedKey;
+        },
+        savePrivateKey: async () => {
+          saves += 1;
+        }
+      }
+    }),
+    [client]
+  );
+
+  await manager.start();
+  assert.equal(manager.receivedOptions[0].privateKey, storedKey);
+  assert.equal(manager.privateKey, storedKey);
+  assert.equal(manager.publicKey, client.publicKey);
+  assert.equal(saves, 0);
+  manager.stop();
+});
+
+test("manager never replays an ordinary RPC after it fails", async () => {
+  let calls = 0;
+  const client = new FakeManagedClient({
+    call: async () => {
+      calls += 1;
+      throw new Error("connection disappeared during invoice");
+    }
+  });
+  const manager = new FakeConnectionManager(managedOptions(), [client]);
+
+  await assert.rejects(manager.invoice({ amount_msat: 1000 }), /connection disappeared/);
+  assert.equal(calls, 1);
+  assert.equal(manager.receivedOptions.length, 1);
+  manager.stop();
+});
+
+test("paid invoice stream resumes from its cursor on a fresh session", async () => {
+  const first = new FakeManagedClient({ invoices: [paidInvoice(8)] });
+  const second = new FakeManagedClient({ invoices: [paidInvoice(9)] });
+  const manager = new FakeConnectionManager(managedOptions(), [first, second]);
+  const invoices = manager.paidInvoices({ lastPayIndex: 7, waitTimeoutSeconds: 1 });
+
+  assert.equal((await invoices.next()).value.pay_index, 8);
+  first.emit("failed");
+  assert.equal((await invoices.next()).value.pay_index, 9);
+  assert.equal(first.invoiceOptions[0].lastPayIndex, 7);
+  assert.equal(second.invoiceOptions[0].lastPayIndex, 8);
+
+  await invoices.return();
+  manager.stop();
+});
+
+test("finite retry exhaustion is stable and can be retried explicitly", async () => {
+  const recovered = new FakeManagedClient();
+  const manager = new FakeConnectionManager(
+    managedOptions({ retry: { minDelayMs: 0, maxDelayMs: 0, jitter: 0, maxAttempts: 1 } }),
+    [new Error("offline"), recovered]
+  );
+
+  await assert.rejects(
+    manager.start(),
+    (error) => error instanceof ZaptunnelError && error.code === "reconnect_exhausted"
+  );
+  assert.equal(manager.status, "failed");
+
+  manager.retryNow();
+  assert.equal(await manager.start(), recovered);
+  manager.stop();
+});
+
+test("manager validates retry policy before starting network work", () => {
+  assert.throws(
+    () => new FakeConnectionManager(managedOptions({ retry: { maxAttempts: 0 } }), []),
+    (error) => error instanceof ZaptunnelError && error.code === "invalid_option"
+  );
+  assert.throws(
+    () =>
+      new FakeConnectionManager(
+        managedOptions({ retry: { minDelayMs: 10, maxDelayMs: 5 } }),
+        []
+      ),
+    (error) => error instanceof ZaptunnelError && error.code === "invalid_option"
+  );
+});
+
+test("stopping a manager aborts connection waiters and is terminal", async () => {
+  let finishAttempt;
+  class PendingManager extends ZaptunnelConnectionManager {
+    establishConnection() {
+      return new Promise((resolve) => {
+        finishAttempt = resolve;
+      });
+    }
+  }
+
+  const manager = new PendingManager(managedOptions());
+  const pending = manager.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  manager.stop();
+
+  await assert.rejects(
+    pending,
+    (error) => error instanceof ZaptunnelError && error.code === "manager_stopped"
+  );
+  await assert.rejects(
+    manager.start(),
+    (error) => error instanceof ZaptunnelError && error.code === "manager_stopped"
+  );
+
+  const lateClient = new FakeManagedClient();
+  finishAttempt(lateClient);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(lateClient.disconnected, true);
+});
 
 test("connection status is exposed without leaking lnmessage internals", () => {
   const client = clientWith(async () => ({}));
