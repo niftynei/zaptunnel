@@ -26,6 +26,7 @@ defmodule ZaptunnelRelay.Address do
   def resolve(%{host: host, port: port}, opts \\ []) do
     allow_private? = Keyword.get(opts, :allow_private?, false)
     allow_onion? = Keyword.get(opts, :allow_onion?, false)
+    resolver = Keyword.get(opts, :resolver, &resolve_host/1)
 
     normalized_host = String.downcase(host)
 
@@ -41,7 +42,7 @@ defmodule ZaptunnelRelay.Address do
         {:error, :invalid_onion_address}
 
       true ->
-        with {:ok, ip} <- resolve_host(host),
+        with {:ok, ip} <- resolver.(host),
              true <- allow_private? or public?(ip) do
           {:ok, {ip, port}}
         else
@@ -104,19 +105,29 @@ defmodule ZaptunnelRelay.Address do
   defp public?({192, 168, _, _}), do: false
   defp public?({192, 0, 0, _}), do: false
   defp public?({192, 0, 2, _}), do: false
+  defp public?({192, 31, 196, _}), do: false
+  defp public?({192, 52, 193, _}), do: false
   defp public?({192, 88, 99, _}), do: false
-  defp public?({198, second, _, _}) when second in [18, 19, 51], do: false
+  defp public?({192, 175, 48, _}), do: false
+  defp public?({198, second, _, _}) when second in [18, 19], do: false
+  defp public?({198, 51, 100, _}), do: false
   defp public?({203, 0, 113, _}), do: false
   defp public?({0, _, _, _}), do: false
   defp public?({first, _, _, _}) when first >= 224, do: false
-  defp public?({0, 0, 0, 0, 0, 0, 0, 1}), do: false
+  defp public?({0, 0, 0, 0, 0, 0, _, _}), do: false
   defp public?({0, 0, 0, 0, 0, 0xFFFF, _, _}), do: false
+  defp public?({0x64, 0xFF9B, 0, 0, 0, 0, _, _}), do: false
   defp public?({0x64, 0xFF9B, 1, _, _, _, _, _}), do: false
   defp public?({0x100, 0, 0, 0, _, _, _, _}), do: false
   defp public?({0x2001, second, _, _, _, _, _, _}) when second <= 0x01FF, do: false
   defp public?({0x2001, 0xDB8, _, _, _, _, _, _}), do: false
+  defp public?({0x2002, _, _, _, _, _, _, _}), do: false
+  defp public?({0x3FFE, _, _, _, _, _, _, _}), do: false
+  defp public?({0x3FFF, second, _, _, _, _, _, _}) when second <= 0x0FFF, do: false
+  defp public?({0x5F00, _, _, _, _, _, _, _}), do: false
   defp public?({first, _, _, _, _, _, _, _}) when first in 0xFC00..0xFDFF, do: false
   defp public?({first, _, _, _, _, _, _, _}) when first in 0xFE80..0xFEBF, do: false
+  defp public?({first, _, _, _, _, _, _, _}) when first in 0xFEC0..0xFEFF, do: false
   defp public?({first, _, _, _, _, _, _, _}) when first in 0xFF00..0xFFFF, do: false
   defp public?({_a, _b, _c, _d}), do: true
   defp public?({_a, _b, _c, _d, _e, _f, _g, _h}), do: true
