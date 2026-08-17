@@ -1,6 +1,8 @@
 defmodule ZaptunnelRelay.SessionTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias ZaptunnelRelay.Session
 
   @node_id "02" <> String.duplicate("11", 32)
@@ -38,6 +40,26 @@ defmodule ZaptunnelRelay.SessionTest do
              Session.handle_in({:binary.copy(<<0>>, maximum + 1), [opcode: :binary]}, state)
 
     assert :ok = Session.terminate(:normal, state)
+  end
+
+  test "logs a correlated and bounded session dial failure" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listener)
+    :ok = :gen_tcp.close(listener)
+
+    log =
+      capture_log(fn ->
+        assert {:stop, :normal} =
+                 Session.init(%{
+                   address: {{127, 0, 0, 1}, port},
+                   node_id: @node_id,
+                   request_id: "zt_1234567890abcdef"
+                 })
+      end)
+
+    assert log =~ "session connect failed request_id=zt_1234567890abcdef"
+    assert log =~ "stage=session_dial reason=econnrefused"
+    assert log =~ "node_id=02111111…11111111"
   end
 
   defp listen(handler) do

@@ -5,6 +5,7 @@ import {
   BITCOIN_MAINNET_CHAIN_HASH,
   ClnCapabilities,
   compareClnVersions,
+  connect,
   encodeRestrictiveGossipTimestampFilter,
   extractInitChainHash,
   parseAddress,
@@ -17,16 +18,56 @@ import {
 const nodeId = "03" + "33".repeat(32);
 
 function clientWith(commando, rune = "default-rune") {
+  const listeners = new Set();
   return new ZaptunnelClient(
     {
       publicKey: "02" + "11".repeat(32),
       privateKey: "22".repeat(32),
+      connectionStatus$: {
+        subscribe(listener) {
+          listeners.add(listener);
+          listener("connected");
+          return { unsubscribe: () => listeners.delete(listener) };
+        }
+      },
       commando,
       disconnect() {}
     },
     { nodeId, address: "node.example.com:9735", rune: rune ?? undefined }
   );
 }
+
+test("connection status is exposed without leaking lnmessage internals", () => {
+  const client = clientWith(async () => ({}));
+  const statuses = [];
+  const unsubscribe = client.onConnectionStatus((status) => statuses.push(status));
+
+  assert.deepEqual(statuses, ["connected"]);
+  assert.equal(typeof unsubscribe, "function");
+  unsubscribe();
+});
+
+test("relay admission failures carry their correlation request id", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ error: "endpoint_unverified", request_id: "zt_1234567890abcdef" }), {
+      status: 422,
+      headers: { "content-type": "application/json", "x-request-id": "zt_header_should_not_win" }
+    });
+
+  try {
+    await assert.rejects(
+      connect({ nodeId, address: "node.example.com:9735", rune: "readonly" }),
+      (error) =>
+        error instanceof ZaptunnelError &&
+        error.code === "endpoint_unverified" &&
+        error.status === 422 &&
+        error.requestId === "zt_1234567890abcdef"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("restrictive gossip filter uses the BOLT 7 no-gossip timestamp range", () => {
   const message = encodeRestrictiveGossipTimestampFilter(BITCOIN_MAINNET_CHAIN_HASH);

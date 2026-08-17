@@ -81,6 +81,13 @@ export type ZaptunnelLogger = {
   error(message: string): void;
 };
 
+export type ZaptunnelConnectionStatus =
+  | "connected"
+  | "connecting"
+  | "waiting_reconnect"
+  | "disconnected"
+  | "failed";
+
 export type ConnectOptions = {
   /** Public Zaptunnel relay origin, for example https://relay.zapptunnel.com. */
   relay?: string;
@@ -106,17 +113,23 @@ export type ConnectOptions = {
 
 type AdmissionResponse = {
   websocket_path: string;
+  request_id?: string;
 };
 
 export class ZaptunnelError extends Error {
   readonly code: string;
   readonly status?: number;
+  readonly requestId?: string;
 
-  constructor(message: string, options: { code: string; status?: number; cause?: unknown }) {
+  constructor(
+    message: string,
+    options: { code: string; status?: number; requestId?: string; cause?: unknown }
+  ) {
     super(message, { cause: options.cause });
     this.name = "ZaptunnelError";
     this.code = options.code;
     this.status = options.status;
+    this.requestId = options.requestId;
   }
 }
 
@@ -187,6 +200,7 @@ export class ZaptunnelClient {
   readonly address: string;
   readonly publicKey: string;
   readonly privateKey: string;
+  readonly requestId?: string;
 
   #rune?: string;
   #transport: Lnmessage;
@@ -195,7 +209,8 @@ export class ZaptunnelClient {
   constructor(
     transport: Lnmessage,
     options: Pick<ConnectOptions, "nodeId" | "address" | "rune">,
-    disconnectCleanup?: () => void
+    disconnectCleanup?: () => void,
+    requestId?: string
   ) {
     this.#transport = transport;
     this.#rune = options.rune;
@@ -204,6 +219,7 @@ export class ZaptunnelClient {
     this.address = options.address;
     this.publicKey = transport.publicKey;
     this.privateKey = transport.privateKey;
+    this.requestId = requestId;
   }
 
   /** Invoke any CLN JSON-RPC method through Commando. */
@@ -314,6 +330,12 @@ export class ZaptunnelClient {
     this.#disconnectCleanup = undefined;
     this.#transport.disconnect();
   }
+
+  /** Observe the stable, high-level state of the underlying Lightning connection. */
+  onConnectionStatus(listener: (status: ZaptunnelConnectionStatus) => void): () => void {
+    const subscription = this.#transport.connectionStatus$.subscribe(listener);
+    return () => subscription.unsubscribe();
+  }
 }
 
 /** Request admission and establish an end-to-end BOLT-8 session with CLN. */
@@ -362,18 +384,25 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
 
     if (!connected) {
       throw new ZaptunnelError("the Lightning connection closed during its BOLT-8 handshake", {
-        code: "connection_closed"
+        code: "connection_closed",
+        requestId: admission.request_id
       });
     }
 
     if (gossipFilterError) {
       throw new ZaptunnelError("failed to configure the Lightning gossip filter", {
         code: "gossip_filter_failed",
+        requestId: admission.request_id,
         cause: gossipFilterError
       });
     }
 
-    return new ZaptunnelClient(transport, options, () => gossipSubscription.unsubscribe());
+    return new ZaptunnelClient(
+      transport,
+      options,
+      () => gossipSubscription.unsubscribe(),
+      admission.request_id
+    );
   } catch (error) {
     gossipSubscription.unsubscribe();
     transport.disconnect();
@@ -381,6 +410,7 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     if (error instanceof ZaptunnelError) throw error;
     throw new ZaptunnelError("failed to establish the Lightning connection", {
       code: "connection_failed",
+      requestId: admission.request_id,
       cause: error
     });
   }
@@ -459,20 +489,26 @@ async function requestAdmission(
   const body = (await response.json().catch(() => ({}))) as Partial<AdmissionResponse> & {
     error?: string;
   };
+  const requestId = body.request_id ?? response.headers.get("x-request-id") ?? undefined;
 
   if (!response.ok) {
     const code = body.error ?? "admission_failed";
-    throw new ZaptunnelError(`Zaptunnel admission failed: ${code}`, { code, status: response.status });
+    throw new ZaptunnelError(`Zaptunnel admission failed: ${code}`, {
+      code,
+      status: response.status,
+      requestId
+    });
   }
 
   if (typeof body.websocket_path !== "string" || !body.websocket_path.startsWith("/")) {
     throw new ZaptunnelError("the relay returned an invalid admission response", {
       code: "invalid_relay_response",
-      status: response.status
+      status: response.status,
+      requestId
     });
   }
 
-  return { websocket_path: body.websocket_path };
+  return { websocket_path: body.websocket_path, request_id: requestId };
 }
 
 export function parseAddress(address: string): { host: string; port: number } {

@@ -45,6 +45,9 @@ defmodule ZaptunnelRelay.RouterTest do
     assert conn.status == 201
     assert %{"websocket_path" => "/v1/connect/" <> ticket} = Jason.decode!(conn.resp_body)
     assert byte_size(ticket) > 20
+    [request_id] = get_resp_header(conn, "x-request-id")
+
+    assert {:ok, %{request_id: ^request_id}} = Admission.claim(ticket)
     assert_receive {:probe, @node_id, {{127, 0, 0, 1}, 9_735}}
   end
 

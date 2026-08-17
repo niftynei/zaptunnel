@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { connect, DEFAULT_RELAY, type ZaptunnelClient } from "./index";
+  import { connect, DEFAULT_RELAY, ZaptunnelError, type ZaptunnelClient } from "./index";
 
   type State = "idle" | "connecting" | "calling" | "success" | "error";
   type GetInfo = {
@@ -53,7 +53,8 @@
       result = await client.getinfo<GetInfo>();
       state = "success";
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error);
+      const requestId = error instanceof ZaptunnelError ? error.requestId : undefined;
+      errorMessage = `${error instanceof Error ? error.message : String(error)}${requestId ? ` (request ${requestId})` : ""}`;
       state = "error";
     } finally {
       client?.disconnect();

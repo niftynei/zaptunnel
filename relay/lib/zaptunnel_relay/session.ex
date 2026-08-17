@@ -8,25 +8,36 @@ defmodule ZaptunnelRelay.Session do
   alias ZaptunnelRelay.Dialer
 
   @impl true
-  def init(%{address: target, node_id: node_id}) do
+  def init(%{address: target, node_id: node_id} = admission) do
     timeout = Application.fetch_env!(:zaptunnel_relay, :connect_timeout_ms)
+    request_id = format_request_id(admission[:request_id])
 
     case Dialer.connect(target, timeout: timeout, active: :once) do
       {:ok, socket} ->
-        Logger.debug("session connected node_id=#{node_id} target=#{format_address(target)}")
+        Logger.info(
+          "session connected request_id=#{request_id} node_id=#{abbreviate(node_id)} " <>
+            "target=#{format_address(target)}"
+        )
+
         ZaptunnelRelay.Telemetry.emit([:session, :start], %{count: 1})
 
         {:ok,
          %{
            socket: socket,
            node_id: node_id,
+           request_id: request_id,
            bytes_from_browser: 0,
            bytes_from_node: 0,
            started_at: System.monotonic_time(:millisecond)
          }}
 
       {:error, reason} ->
-        Logger.info("session connect failed node_id=#{node_id} reason=#{inspect(reason)}")
+        Logger.warning(
+          "session connect failed request_id=#{request_id} stage=session_dial " <>
+            "reason=#{safe_reason(reason)} node_id=#{abbreviate(node_id)} " <>
+            "target=#{format_address(target)}"
+        )
+
         {:stop, :normal}
     end
   end
@@ -67,10 +78,18 @@ defmodule ZaptunnelRelay.Session do
   def terminate(reason, %{socket: socket} = state) do
     :gen_tcp.close(socket)
 
+    duration_ms = System.monotonic_time(:millisecond) - state.started_at
+
+    Logger.info(
+      "session ended request_id=#{state.request_id} reason=#{safe_reason(reason)} " <>
+        "node_id=#{abbreviate(state.node_id)} duration_ms=#{duration_ms} " <>
+        "browser_bytes=#{state.bytes_from_browser} node_bytes=#{state.bytes_from_node}"
+    )
+
     ZaptunnelRelay.Telemetry.emit(
       [:session, :stop],
       %{
-        duration_ms: System.monotonic_time(:millisecond) - state.started_at,
+        duration_ms: duration_ms,
         bytes_from_browser: state.bytes_from_browser,
         bytes_from_node: state.bytes_from_node
       },
@@ -87,4 +106,15 @@ defmodule ZaptunnelRelay.Session do
   end
 
   defp format_address({:onion, host, port}), do: "#{host}:#{port}"
+
+  defp format_request_id("zt_" <> rest = request_id) when byte_size(rest) == 16, do: request_id
+  defp format_request_id(_request_id), do: "internal"
+
+  defp abbreviate(<<prefix::binary-size(8), _middle::binary-size(50), suffix::binary-size(8)>>),
+    do: prefix <> "…" <> suffix
+
+  defp abbreviate(_node_id), do: "invalid"
+
+  defp safe_reason(reason) when is_atom(reason), do: reason
+  defp safe_reason(_reason), do: :error
 end

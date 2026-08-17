@@ -156,6 +156,9 @@ when behavior or a response field changed within an existing method.
 ## Stable errors
 
 All SDK errors extend `ZaptunnelError` and expose a stable string `code`.
+Relay and connection errors also expose `requestId` when the relay supplied one;
+include that identifier in bug reports so an operator can find the matching
+verification and session logs without receiving your rune or RPC payload.
 RPC failures are `ZaptunnelRpcError` instances and additionally preserve the
 RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 
@@ -189,10 +192,26 @@ try {
   if (error instanceof ZaptunnelRpcError && error.code === "rune_not_authorized") {
     // Ask for a new, narrowly scoped rune.
   } else if (error instanceof ZaptunnelError) {
-    console.error(error.code, error.message);
+    console.error(error.code, error.requestId, error.message);
   }
 }
 ```
+
+## Connection status
+
+Use the stable status callback to update UI or detect a lost connection without
+depending on `lnmessage` internals:
+
+```ts
+const stopWatching = node.onConnectionStatus((status) => {
+  // connected | connecting | waiting_reconnect | disconnected | failed
+  console.log(status);
+});
+
+stopWatching();
+```
+
+`node.requestId` identifies the admission/session that created this client.
 
 ## Browser identity
 

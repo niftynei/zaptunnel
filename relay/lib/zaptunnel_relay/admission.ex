@@ -7,8 +7,8 @@ defmodule ZaptunnelRelay.Admission do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def issue(node_id, address) do
-    GenServer.call(__MODULE__, {:issue, node_id, address})
+  def issue(node_id, address, opts \\ []) do
+    GenServer.call(__MODULE__, {:issue, node_id, address, Keyword.get(opts, :request_id)})
   end
 
   def claim(ticket, owner \\ self()) do
@@ -41,7 +41,7 @@ defmodule ZaptunnelRelay.Admission do
   end
 
   @impl true
-  def handle_call({:issue, node_id, address}, _from, state) do
+  def handle_call({:issue, node_id, address, request_id}, _from, state) do
     cond do
       state.draining ->
         {:reply, {:error, :relay_draining}, state}
@@ -57,7 +57,7 @@ defmodule ZaptunnelRelay.Admission do
         ticket = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
         ttl = Application.fetch_env!(:zaptunnel_relay, :ticket_ttl_ms)
         timer = Process.send_after(self(), {:expire, ticket}, ttl)
-        entry = %{node_id: node_id, address: address, timer: timer}
+        entry = %{node_id: node_id, address: address, request_id: request_id, timer: timer}
 
         state = %{
           state
@@ -107,7 +107,7 @@ defmodule ZaptunnelRelay.Admission do
         ref = Process.monitor(owner)
         active = Map.put(state.active, ref, entry.node_id)
 
-        {:reply, {:ok, Map.take(entry, [:node_id, :address])},
+        {:reply, {:ok, Map.take(entry, [:node_id, :address, :request_id])},
          %{state | tickets: tickets, active: active}}
     end
   end

@@ -74,7 +74,8 @@ defmodule ZaptunnelRelay.Router do
                ZaptunnelRelay.EndpointVerifier.verify(node_id, pinned_address,
                  request_id: request_id
                ),
-             {:ok, ticket} <- ZaptunnelRelay.Admission.issue(node_id, pinned_address) do
+             {:ok, ticket} <-
+               ZaptunnelRelay.Admission.issue(node_id, pinned_address, request_id: request_id) do
           {:ok, ticket}
         end
 
@@ -107,7 +108,12 @@ defmodule ZaptunnelRelay.Router do
           max_frame_size: Application.fetch_env!(:zaptunnel_relay, :max_websocket_frame_bytes)
         )
       else
-        _error -> json(conn, 401, %{error: "invalid_ticket"})
+        _error ->
+          Logger.warning(
+            "session ticket rejected request_id=#{conn.assigns.zaptunnel_request_id} reason=invalid_ticket"
+          )
+
+          json(conn, 401, %{error: "invalid_ticket"})
       end
     end)
   end

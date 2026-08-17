@@ -18,10 +18,22 @@ defmodule ZaptunnelRelay.AdmissionTest do
     assert {:error, :connection_limit} = Admission.issue(@node_id, @address)
 
     owner = spawn(fn -> Process.sleep(:infinity) end)
-    assert {:ok, %{node_id: @node_id, address: @address}} = Admission.claim(first, owner)
+
+    assert {:ok, %{node_id: @node_id, address: @address, request_id: nil}} =
+             Admission.claim(first, owner)
+
     Process.exit(owner, :kill)
 
     eventually(fn -> match?({:ok, _ticket}, Admission.issue(@node_id, @address)) end)
+  end
+
+  test "carries the admission request id into the claimed session" do
+    request_id = "zt_1234567890abcdef"
+
+    assert {:ok, ticket} = Admission.issue(@node_id, @address, request_id: request_id)
+
+    assert {:ok, %{node_id: @node_id, address: @address, request_id: ^request_id}} =
+             Admission.claim(ticket)
   end
 
   test "tickets are single-use" do
