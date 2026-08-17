@@ -714,6 +714,99 @@ form input:focus {
   font-size: 14px;
 }
 
+.diagnostic > strong {
+  display: block;
+  color: #ffd0ca;
+  font-size: 17px;
+}
+
+.diagnostic > p {
+  margin: 7px 0 13px;
+  line-height: 1.55;
+}
+
+.diagnostic-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 15px;
+  font: 10px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.diagnostic-meta span,
+.diagnostic-meta code {
+  padding: 5px 7px;
+  border: 1px solid #814e49;
+  border-radius: 2px;
+  color: #efb6af;
+  background: #2b211f;
+}
+
+.suggestions {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 16px;
+  padding-left: 18px;
+  color: #e1c7c3;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.request-id {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid #523b38;
+}
+
+.request-id span {
+  min-width: 0;
+}
+
+.request-id small {
+  display: block;
+  margin-bottom: 3px;
+  color: #b98e89;
+  font: 9px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.request-id code {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #f2d2ce;
+  font-size: 11px;
+}
+
+.request-id button,
+.diagnostic-actions button {
+  min-height: 40px;
+  padding: 9px 13px;
+  border: 1px solid #9f6d67;
+  border-radius: 3px;
+  color: #ffd6d1;
+  background: #352725;
+  cursor: pointer;
+  font: 700 11px var(--font-mono);
+}
+
+.diagnostic-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 7px;
+}
+
+.diagnostic-actions button {
+  border-color: #f5b942;
+  color: #11140e;
+  background: var(--neon-yellow);
+}
+
 .result.success {
   border-style: solid;
   border-color: #5f8a68;

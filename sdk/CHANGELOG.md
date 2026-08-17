@@ -5,6 +5,8 @@
 - Add a resilient connection manager with fresh-admission retries, browser
   lifecycle recovery, identity persistence hooks, and reconnect-safe invoice
   streaming without automatic RPC replay.
+- Add structured connection troubleshooting, actionable demo failures, and
+  detailed manager state snapshots with attempt and retry timing.
 
 ## 0.3.0
 

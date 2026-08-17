@@ -7,6 +7,7 @@ import {
   calculateReconnectDelay,
   compareClnVersions,
   connect,
+  diagnoseZaptunnelError,
   encodeRestrictiveGossipTimestampFilter,
   extractInitChainHash,
   parseAddress,
@@ -129,6 +130,83 @@ test("reconnect delay is bounded exponential backoff with deterministic jitter",
   assert.equal(calculateReconnectDelay(9, policy, () => 1), 1_000);
   assert.equal(calculateReconnectDelay(1, policy, () => 0), 75);
   assert.equal(calculateReconnectDelay(1, policy, () => 1), 125);
+});
+
+test("troubleshooting diagnostics map stable errors to actionable stages", () => {
+  const diagnostic = diagnoseZaptunnelError(
+    new ZaptunnelError("relay rejected the endpoint", {
+      code: "endpoint_unverified",
+      requestId: "zt_request_123"
+    })
+  );
+
+  assert.equal(diagnostic.code, "endpoint_unverified");
+  assert.equal(diagnostic.stage, "endpoint_verification");
+  assert.equal(diagnostic.title, "Lightning endpoint could not be verified");
+  assert.equal(diagnostic.retryable, true);
+  assert.equal(diagnostic.requestId, "zt_request_123");
+  assert.ok(diagnostic.suggestions.some((item) => item.includes("node ID")));
+});
+
+test("troubleshooting diagnostics preserve the underlying error after retries exhaust", () => {
+  const underlying = new ZaptunnelError("relay could not reach the node", {
+    code: "endpoint_unverified",
+    requestId: "zt_request_nested"
+  });
+  const diagnostic = diagnoseZaptunnelError(
+    new ZaptunnelError("connection retries exhausted", {
+      code: "reconnect_exhausted",
+      cause: underlying
+    })
+  );
+
+  assert.equal(diagnostic.code, "reconnect_exhausted");
+  assert.equal(diagnostic.causeCode, "endpoint_unverified");
+  assert.equal(diagnostic.stage, "endpoint_verification");
+  assert.equal(diagnostic.title, "Connection retries exhausted");
+  assert.equal(diagnostic.requestId, "zt_request_nested");
+  assert.ok(diagnostic.suggestions.some((item) => item.includes("retryNow")));
+  assert.ok(diagnostic.suggestions.some((item) => item.includes("node ID")));
+});
+
+test("troubleshooting diagnostics safely handle unknown errors", () => {
+  const diagnostic = diagnoseZaptunnelError(new Error("internal detail that should not be exposed"));
+
+  assert.equal(diagnostic.code, "unknown_error");
+  assert.equal(diagnostic.stage, "unknown");
+  assert.equal(diagnostic.retryable, false);
+  assert.equal(diagnostic.summary.includes("internal detail"), false);
+});
+
+test("manager exposes retry timing and diagnostic state", async () => {
+  const manager = new FakeConnectionManager(
+    managedOptions({ retry: { minDelayMs: 1_000, maxDelayMs: 1_000, jitter: 0 } }),
+    [
+      new ZaptunnelError("relay rejected the endpoint", {
+        code: "endpoint_unverified",
+        requestId: "zt_manager_request"
+      })
+    ]
+  );
+  const states = [];
+  const unsubscribe = manager.onConnectionState((state) => states.push(state));
+  const pending = manager.start();
+  pending.catch(() => {});
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const state = manager.connectionState;
+  assert.equal(state.status, "waiting_reconnect");
+  assert.equal(state.attempt, 1);
+  assert.equal(state.diagnostic?.stage, "endpoint_verification");
+  assert.equal(state.requestId, "zt_manager_request");
+  assert.equal(typeof state.nextRetryAt, "number");
+  assert.ok(state.retryInMs >= 0 && state.retryInMs <= 1_000);
+  assert.ok(states.some((item) => item.status === "connecting"));
+  assert.ok(states.some((item) => item.nextRetryAt !== null));
+
+  unsubscribe();
+  manager.stop();
+  await assert.rejects(pending, (error) => error.code === "manager_stopped");
 });
 
 test("manager retries with fresh sessions and preserves the generated browser identity", async () => {

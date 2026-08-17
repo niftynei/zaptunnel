@@ -291,6 +291,56 @@ try {
 }
 ```
 
+## Connection troubleshooting
+
+Use `diagnoseZaptunnelError()` when showing a failure to a person. It returns a
+safe summary, a failure stage, concrete suggestions, retryability, and the relay
+request ID without exposing a rune or raw internal error text:
+
+```ts
+import { diagnoseZaptunnelError } from "@zaptunnel/sdk";
+
+try {
+  await node.getinfo();
+} catch (error) {
+  const diagnostic = diagnoseZaptunnelError(error);
+  showConnectionProblem({
+    title: diagnostic.title,
+    detail: diagnostic.summary,
+    suggestions: diagnostic.suggestions,
+    requestId: diagnostic.requestId
+  });
+}
+```
+
+The `stage` value separates invalid input, relay admission, endpoint
+verification, the Lightning handshake, rune authorization, RPC execution, and
+manager lifecycle failures. When a finite retry policy ends,
+`code` is `reconnect_exhausted` while `causeCode` and `stage` retain the useful
+underlying failure.
+
+Long-lived applications can render retries without parsing status strings:
+
+```ts
+const stopWatching = node.onConnectionState((state) => {
+  renderConnectionState({
+    status: state.status,
+    attempt: state.attempt,
+    retryInMs: state.retryInMs,
+    diagnostic: state.diagnostic
+  });
+});
+
+// After the user fixes an address, Tor, or connectivity problem:
+node.retryNow();
+```
+
+`nextRetryAt` is an absolute Unix timestamp in milliseconds. `retryInMs` is the
+remaining delay when that snapshot was produced; read `node.connectionState`
+again to update a live countdown. A request ID is safe to give the Zaptunnel
+operator for log correlation. Never include the rune or browser private key in
+a support report.
+
 ## Single-session connection status
 
 Use the stable status callback to update UI or detect a lost connection without

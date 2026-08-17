@@ -96,6 +96,41 @@ export type ZaptunnelManagerStatus =
   | "failed"
   | "stopped";
 
+export type ZaptunnelFailureStage =
+  | "input"
+  | "relay_admission"
+  | "endpoint_verification"
+  | "lightning_handshake"
+  | "authorization"
+  | "rpc"
+  | "lifecycle"
+  | "unknown";
+
+export type ZaptunnelTroubleshooting = {
+  /** Stable SDK error code. */
+  code: string;
+  /** More specific nested error when a lifecycle wrapper exhausted retries. */
+  causeCode?: string;
+  stage: ZaptunnelFailureStage;
+  title: string;
+  summary: string;
+  retryable: boolean;
+  requestId?: string;
+  suggestions: readonly string[];
+};
+
+export type ZaptunnelManagerState = {
+  status: ZaptunnelManagerStatus;
+  /** One-based attempt number for the current outage; zero while connected. */
+  attempt: number;
+  /** Unix timestamp in milliseconds, or null when no retry is scheduled. */
+  nextRetryAt: number | null;
+  /** Remaining delay at the instant this snapshot was read. */
+  retryInMs: number | null;
+  requestId?: string;
+  diagnostic?: ZaptunnelTroubleshooting;
+};
+
 export type ReconnectPolicy = {
   /** First retry delay. Defaults to 1 second. */
   minDelayMs?: number;
@@ -187,6 +222,291 @@ export class ZaptunnelRpcError extends ZaptunnelError {
     this.rpcCode = options.rpcCode;
     this.data = options.data;
   }
+}
+
+type TroubleshootingDefinition = Omit<
+  ZaptunnelTroubleshooting,
+  "code" | "causeCode" | "requestId"
+>;
+
+const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Object.freeze({
+  invalid_node_id: {
+    stage: "input",
+    title: "Invalid node ID",
+    summary: "The node ID is not a 33-byte compressed secp256k1 public key.",
+    retryable: false,
+    suggestions: ["Copy the id field from lightning-cli getinfo."]
+  },
+  invalid_address: {
+    stage: "input",
+    title: "Invalid Lightning address",
+    summary: "The address must contain a hostname or IP address and Lightning peer port.",
+    retryable: false,
+    suggestions: ["Use host:port, or [IPv6]:port, without http:// or https://."]
+  },
+  invalid_relay: {
+    stage: "input",
+    title: "Invalid relay address",
+    summary: "The relay must be an HTTP or HTTPS origin.",
+    retryable: false,
+    suggestions: ["Use https://relay.zapptunnel.com or a complete self-hosted relay origin."]
+  },
+  invalid_chain_hash: {
+    stage: "input",
+    title: "Invalid chain hash",
+    summary: "The BOLT chain hash must be exactly 32 bytes of hexadecimal data.",
+    retryable: false,
+    suggestions: ["Remove chainHash to use automatic network detection when possible."]
+  },
+  invalid_cln_version: {
+    stage: "input",
+    title: "Invalid CLN version",
+    summary: "The version requirement is not in a supported CLN version format.",
+    retryable: false,
+    suggestions: ["Use a version such as v24.02 or v24.02.1."]
+  },
+  invalid_option: {
+    stage: "input",
+    title: "Invalid SDK option",
+    summary: "One of the SDK or retry-policy options is outside its accepted range.",
+    retryable: false,
+    suggestions: ["Correct the option identified by the original error message."]
+  },
+  relay_unreachable: {
+    stage: "relay_admission",
+    title: "Relay unreachable",
+    summary: "The browser could not reach the relay admission endpoint.",
+    retryable: true,
+    suggestions: ["Check internet connectivity and the relay URL.", "Retry after the relay is reachable."]
+  },
+  invalid_relay_response: {
+    stage: "relay_admission",
+    title: "Invalid relay response",
+    summary: "The relay returned a response this SDK version does not understand.",
+    retryable: true,
+    suggestions: ["Check SDK/relay compatibility.", "Report the request ID to the relay operator."]
+  },
+  admission_failed: {
+    stage: "relay_admission",
+    title: "Relay admission failed",
+    summary: "The relay refused the connection without a more specific stable code.",
+    retryable: true,
+    suggestions: ["Retry once, then report the request ID if the failure continues."]
+  },
+  rate_limited: {
+    stage: "relay_admission",
+    title: "Too many connection requests",
+    summary: "The relay is temporarily rate limiting this client.",
+    retryable: true,
+    suggestions: ["Wait for the SDK backoff instead of repeatedly retrying manually."]
+  },
+  connection_limit: {
+    stage: "relay_admission",
+    title: "Free connection limit reached",
+    summary: "This node already has the maximum number of concurrent free sessions.",
+    retryable: true,
+    suggestions: ["Close an unused session or wait for one to disconnect before retrying."]
+  },
+  relay_draining: {
+    stage: "relay_admission",
+    title: "Relay restarting",
+    summary: "The relay is draining existing sessions and temporarily refusing new admission.",
+    retryable: true,
+    suggestions: ["Allow the connection manager to retry after the deployment completes."]
+  },
+  relay_overloaded: {
+    stage: "relay_admission",
+    title: "Relay at capacity",
+    summary: "The relay does not currently have capacity for another session.",
+    retryable: true,
+    suggestions: ["Wait for automatic backoff or use another relay deployment."]
+  },
+  onion_unavailable: {
+    stage: "relay_admission",
+    title: "Tor routing unavailable",
+    summary: "The selected relay cannot currently route v3 onion addresses.",
+    retryable: true,
+    suggestions: ["Use a Tor-capable relay or provide the node's clearnet address."]
+  },
+  invalid_ticket: {
+    stage: "relay_admission",
+    title: "Expired relay ticket",
+    summary: "The single-use WebSocket admission ticket was invalid, expired, or already used.",
+    retryable: true,
+    suggestions: ["Request fresh admission; createConnectionManager() does this automatically."]
+  },
+  endpoint_unverified: {
+    stage: "endpoint_verification",
+    title: "Lightning endpoint could not be verified",
+    summary: "The supplied address did not complete a BOLT-8 handshake as the supplied node ID.",
+    retryable: true,
+    suggestions: [
+      "Confirm the node ID and peer address came from the same CLN node.",
+      "Confirm CLN is online and accepting Lightning peer connections on that port.",
+      "For onion addresses, confirm the onion service maps to the CLN peer listener."
+    ]
+  },
+  connection_closed: {
+    stage: "lightning_handshake",
+    title: "Lightning connection closed",
+    summary: "The peer connection closed before or after the BOLT-8 session was established.",
+    retryable: true,
+    suggestions: ["Check CLN availability and let the connection manager create a fresh session."]
+  },
+  connection_failed: {
+    stage: "lightning_handshake",
+    title: "Lightning connection failed",
+    summary: "The browser and CLN node could not finish their encrypted Lightning connection.",
+    retryable: true,
+    suggestions: ["Check the node address, CLN logs, and relay request ID before retrying."]
+  },
+  gossip_filter_failed: {
+    stage: "lightning_handshake",
+    title: "Gossip filter failed",
+    summary: "The SDK connected but could not configure its restrictive BOLT 7 gossip filter.",
+    retryable: true,
+    suggestions: ["Retry with a fresh session and report the request ID if it repeats."]
+  },
+  rune_required: {
+    stage: "authorization",
+    title: "Rune required",
+    summary: "A Commando RPC call was attempted without a rune.",
+    retryable: false,
+    suggestions: ["Provide a narrowly scoped rune that permits the requested RPC method."]
+  },
+  rune_not_authorized: {
+    stage: "authorization",
+    title: "Rune not authorized",
+    summary: "CLN rejected the rune or its restrictions for this RPC call.",
+    retryable: false,
+    suggestions: ["Create a new least-privilege rune permitting the method and parameters."]
+  },
+  method_not_found: {
+    stage: "rpc",
+    title: "RPC method unavailable",
+    summary: "The connected CLN node does not expose the requested RPC method.",
+    retryable: false,
+    suggestions: ["Use getCapabilities() and check the node's CLN version and plugins."]
+  },
+  unsupported_method: {
+    stage: "rpc",
+    title: "RPC capability unavailable",
+    summary: "The application's required RPC method is not exposed by this node.",
+    retryable: false,
+    suggestions: ["Choose a supported fallback or update the node/plugin configuration."]
+  },
+  unsupported_cln_version: {
+    stage: "rpc",
+    title: "CLN version unsupported",
+    summary: "The connected node is older than the application requires.",
+    retryable: false,
+    suggestions: ["Upgrade CLN or use a feature compatible with the reported version."]
+  },
+  invalid_params: {
+    stage: "rpc",
+    title: "Invalid RPC parameters",
+    summary: "CLN rejected the supplied method parameters.",
+    retryable: false,
+    suggestions: ["Compare the parameters with the RPC documentation for this CLN version."]
+  },
+  invalid_rpc_response: {
+    stage: "rpc",
+    title: "Invalid CLN response",
+    summary: "CLN returned a response that violated the SDK's expected safety constraints.",
+    retryable: false,
+    suggestions: ["Check the node's CLN version and report the preserved RPC details."]
+  },
+  rpc_timeout: {
+    stage: "rpc",
+    title: "CLN wait timed out",
+    summary: "A CLN-side wait reached its configured deadline without an event.",
+    retryable: true,
+    suggestions: ["This is expected for finite long polls; continue waiting when appropriate."]
+  },
+  request_timeout: {
+    stage: "rpc",
+    title: "Local request timed out",
+    summary: "The browser stopped waiting before the RPC completed.",
+    retryable: true,
+    suggestions: ["Increase timeoutMs only when the RPC is safe to wait for or retry."]
+  },
+  request_aborted: {
+    stage: "lifecycle",
+    title: "Request cancelled",
+    summary: "The application cancelled this connection or RPC operation.",
+    retryable: true,
+    suggestions: ["Start a new operation only if cancellation was not intentional."]
+  },
+  rpc_failed: {
+    stage: "rpc",
+    title: "CLN RPC failed",
+    summary: "CLN returned an RPC error without a more specific stable SDK code.",
+    retryable: false,
+    suggestions: ["Inspect the preserved RPC code and data before deciding whether to retry."]
+  },
+  reconnect_exhausted: {
+    stage: "lifecycle",
+    title: "Connection retries exhausted",
+    summary: "The connection manager reached its configured attempt limit.",
+    retryable: true,
+    suggestions: ["Fix the underlying error, then call retryNow() to begin another retry cycle."]
+  },
+  manager_stopped: {
+    stage: "lifecycle",
+    title: "Connection manager stopped",
+    summary: "This manager was permanently stopped and cannot create another session.",
+    retryable: false,
+    suggestions: ["Create a new connection manager instance when another session is needed."]
+  }
+});
+
+const UNKNOWN_TROUBLESHOOTING: TroubleshootingDefinition = Object.freeze({
+  stage: "unknown",
+  title: "Unexpected connection error",
+  summary: "The failure did not contain a stable Zaptunnel error code.",
+  retryable: false,
+  suggestions: ["Capture the browser console details and report what operation failed."]
+});
+
+/** Turn an SDK error into safe, user-facing troubleshooting data. */
+export function diagnoseZaptunnelError(error: unknown): ZaptunnelTroubleshooting {
+  const chain = zaptunnelErrorChain(error);
+  const primary = chain[0];
+  const underlying = chain.find((item) => item.code !== "reconnect_exhausted") ?? primary;
+  const primaryDefinition = primary ? TROUBLESHOOTING[primary.code] : undefined;
+  const underlyingDefinition = underlying ? TROUBLESHOOTING[underlying.code] : undefined;
+  const definition = primaryDefinition ?? underlyingDefinition ?? UNKNOWN_TROUBLESHOOTING;
+  const suggestions = [
+    ...definition.suggestions,
+    ...(underlyingDefinition && underlyingDefinition !== definition
+      ? underlyingDefinition.suggestions
+      : [])
+  ].filter((suggestion, index, all) => all.indexOf(suggestion) === index);
+
+  return {
+    code: primary?.code ?? "unknown_error",
+    causeCode: underlying && underlying !== primary ? underlying.code : undefined,
+    stage: underlyingDefinition?.stage ?? definition.stage,
+    title: definition.title,
+    summary: underlyingDefinition?.summary ?? definition.summary,
+    retryable: definition.retryable || underlyingDefinition?.retryable === true,
+    requestId: chain.find((item) => item.requestId)?.requestId,
+    suggestions: Object.freeze(suggestions)
+  };
+}
+
+function zaptunnelErrorChain(error: unknown): ZaptunnelError[] {
+  const chain: ZaptunnelError[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+
+  for (let depth = 0; depth < 8 && current !== undefined && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (current instanceof ZaptunnelError) chain.push(current);
+    current = current instanceof Error ? current.cause : undefined;
+  }
+
+  return chain;
 }
 
 export class ClnCapabilities {
@@ -501,12 +821,14 @@ export class ZaptunnelConnectionManager {
   #attemptInFlight = false;
   #attempts = 0;
   #retryTimer?: ReturnType<typeof setTimeout>;
+  #nextRetryAt: number | null = null;
   #started = false;
   #stopped = false;
   #status: ZaptunnelManagerStatus = "idle";
   #lastError?: unknown;
   #terminalError?: ZaptunnelError;
   #listeners = new Set<(status: ZaptunnelManagerStatus) => void>();
+  #stateListeners = new Set<(state: ZaptunnelManagerState) => void>();
   #waiters = new Set<ConnectionWaiter>();
   #onlineListener = () => this.retryNow();
   #visibilityListener = () => {
@@ -551,6 +873,21 @@ export class ZaptunnelConnectionManager {
     return this.#lastError;
   }
 
+  /** A point-in-time lifecycle snapshot suitable for troubleshooting UI. */
+  get connectionState(): ZaptunnelManagerState {
+    const error = this.#terminalError ?? this.#lastError;
+    const diagnostic = error === undefined ? undefined : diagnoseZaptunnelError(error);
+    return {
+      status: this.#status,
+      attempt: this.#attempts,
+      nextRetryAt: this.#nextRetryAt,
+      retryInMs:
+        this.#nextRetryAt === null ? null : Math.max(0, this.#nextRetryAt - Date.now()),
+      requestId: this.#client?.requestId ?? diagnostic?.requestId,
+      diagnostic
+    };
+  }
+
   /** Start the lifecycle and resolve when the current session is connected. */
   start(): Promise<ZaptunnelClient> {
     return this.#waitForClient();
@@ -588,6 +925,13 @@ export class ZaptunnelConnectionManager {
     this.#listeners.add(listener);
     this.#notifyListener(listener, this.#status);
     return () => this.#listeners.delete(listener);
+  }
+
+  /** Subscribe to detailed lifecycle snapshots. The current snapshot is delivered immediately. */
+  onConnectionState(listener: (state: ZaptunnelManagerState) => void): () => void {
+    this.#stateListeners.add(listener);
+    this.#notifyStateListener(listener, this.connectionState);
+    return () => this.#stateListeners.delete(listener);
   }
 
   /** Invoke one RPC on one connected session. It is never replayed after failure. */
@@ -702,6 +1046,7 @@ export class ZaptunnelConnectionManager {
       this.#sessionAbort = new AbortController();
       this.#attempts = 0;
       this.#lastError = undefined;
+      this.#terminalError = undefined;
       this.#privateKey = client.privateKey;
 
       this.#clientStatusCleanup = client.onConnectionStatus((status) => {
@@ -739,6 +1084,10 @@ export class ZaptunnelConnectionManager {
 
   #handleConnectionLoss(client: ZaptunnelClient): void {
     if (client !== this.#client || this.#stopped) return;
+    this.#lastError = new ZaptunnelError("the active Lightning connection closed", {
+      code: "connection_closed",
+      requestId: client.requestId
+    });
     this.#dropClient();
     this.#attempts = 0;
     this.#setStatus("waiting_reconnect");
@@ -760,15 +1109,23 @@ export class ZaptunnelConnectionManager {
     if (replace) this.#clearRetryTimer();
     if (this.#retryTimer !== undefined) return;
 
+    this.#nextRetryAt = Date.now() + delayMs;
     this.#retryTimer = setTimeout(() => {
       this.#retryTimer = undefined;
+      this.#nextRetryAt = null;
+      this.#emitState();
       void this.#attemptConnection();
     }, delayMs);
+    this.#emitState();
   }
 
   #clearRetryTimer(): void {
     if (this.#retryTimer !== undefined) clearTimeout(this.#retryTimer);
     this.#retryTimer = undefined;
+    if (this.#nextRetryAt !== null) {
+      this.#nextRetryAt = null;
+      this.#emitState();
+    }
   }
 
   async #waitForClient(signal?: AbortSignal): Promise<ZaptunnelClient> {
@@ -832,9 +1189,29 @@ export class ZaptunnelConnectionManager {
   }
 
   #setStatus(status: ZaptunnelManagerStatus): void {
-    if (status === this.#status) return;
+    if (status === this.#status) {
+      this.#emitState();
+      return;
+    }
     this.#status = status;
     for (const listener of this.#listeners) this.#notifyListener(listener, status);
+    this.#emitState();
+  }
+
+  #emitState(): void {
+    const state = this.connectionState;
+    for (const listener of this.#stateListeners) this.#notifyStateListener(listener, state);
+  }
+
+  #notifyStateListener(
+    listener: (state: ZaptunnelManagerState) => void,
+    state: ZaptunnelManagerState
+  ): void {
+    try {
+      listener(state);
+    } catch (error) {
+      this.#options.logger?.error(`Zaptunnel connection-state listener failed: ${safeMessage(error)}`);
+    }
   }
 
   #notifyListener(

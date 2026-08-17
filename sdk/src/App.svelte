@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { connect, DEFAULT_RELAY, ZaptunnelError, type ZaptunnelClient } from "./index";
+  import {
+    connect,
+    DEFAULT_RELAY,
+    diagnoseZaptunnelError,
+    type ZaptunnelClient,
+    type ZaptunnelTroubleshooting
+  } from "./index";
 
   type State = "idle" | "connecting" | "calling" | "success" | "error";
   type GetInfo = {
@@ -27,7 +33,8 @@
   let copied = false;
   let state: State = "idle";
   let result: GetInfo | null = null;
-  let errorMessage = "";
+  let diagnostic: ZaptunnelTroubleshooting | null = null;
+  let requestIdCopied = false;
 
   async function copyCommand() {
     await navigator.clipboard.writeText(runeCommand);
@@ -38,7 +45,8 @@
   async function runGetInfo() {
     state = "connecting";
     result = null;
-    errorMessage = "";
+    diagnostic = null;
+    requestIdCopied = false;
     let client: ZaptunnelClient | undefined;
 
     try {
@@ -53,12 +61,18 @@
       result = await client.getinfo<GetInfo>();
       state = "success";
     } catch (error) {
-      const requestId = error instanceof ZaptunnelError ? error.requestId : undefined;
-      errorMessage = `${error instanceof Error ? error.message : String(error)}${requestId ? ` (request ${requestId})` : ""}`;
+      diagnostic = diagnoseZaptunnelError(error);
       state = "error";
     } finally {
       client?.disconnect();
     }
+  }
+
+  async function copyRequestId() {
+    if (!diagnostic?.requestId) return;
+    await navigator.clipboard.writeText(diagnostic.requestId);
+    requestIdCopied = true;
+    window.setTimeout(() => (requestIdCopied = false), 1800);
   }
 </script>
 
@@ -183,8 +197,29 @@
             <div class="empty-result"><span>ϟ</span><p>Your node information will appear here.</p></div>
           {:else if state === "connecting" || state === "calling"}
             <div class="working"><i></i><p>{state === "connecting" ? "Negotiating an encrypted peer session…" : "Commando request sent. Waiting for CLN…"}</p></div>
-          {:else if state === "error"}
-            <strong>Connection failed</strong><p>{errorMessage}</p>
+          {:else if state === "error" && diagnostic}
+            <div class="diagnostic">
+              <strong>{diagnostic.title}</strong>
+              <p>{diagnostic.summary}</p>
+              <div class="diagnostic-meta">
+                <span>{diagnostic.stage.replaceAll("_", " ")}</span>
+                <code>{diagnostic.causeCode ?? diagnostic.code}</code>
+              </div>
+              <ul class="suggestions">
+                {#each diagnostic.suggestions as suggestion}
+                  <li>{suggestion}</li>
+                {/each}
+              </ul>
+              {#if diagnostic.requestId}
+                <div class="request-id">
+                  <span><small>Relay request ID</small><code>{diagnostic.requestId}</code></span>
+                  <button type="button" onclick={copyRequestId}>{requestIdCopied ? "Copied" : "Copy"}</button>
+                </div>
+              {/if}
+              <div class="diagnostic-actions">
+                <button type="button" onclick={runGetInfo}>Try connection again</button>
+              </div>
+            </div>
           {:else if result}
             <div class="node-summary">
               <div class="node-color" style:background={result.color ? `#${result.color}` : "#f5b942"}></div>

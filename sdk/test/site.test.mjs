@@ -74,6 +74,15 @@ test("the connection form documents clearnet and v3 onion addresses", () => {
   assert.match(app, /\.onion:9735/);
 });
 
+test("the live demo renders actionable connection troubleshooting", () => {
+  assert.match(app, /diagnoseZaptunnelError/);
+  assert.match(app, /diagnostic\.suggestions/);
+  assert.match(app, /Relay request ID/);
+  assert.match(app, /copyRequestId/);
+  assert.match(app, /Try connection again/);
+  assert.match(css, /\.diagnostic-meta/);
+});
+
 test("the node ID pattern survives Svelte compilation and accepts a real compressed key", () => {
   const nodeId = "02cca6c5c966fcf61d121e3a70e03a1cd9eeeea024b26ea666ce974d43b242e636";
   const nodeIdPattern = /^(02|03)[0-9a-fA-F]{64}$/;
