@@ -102,6 +102,11 @@ managed SOCKS5 proxy, set `tor.manageService = false` and configure
 relay and Tor units, or `make tor-logs` to follow Tor bootstrap and connection
 messages.
 
+The relay drains during service shutdown. `drainTimeoutSeconds` defaults to 30
+seconds; increase it if preserving longer-lived sessions during planned
+deployments is more important than deployment speed. `/healthz` remains a
+liveness endpoint while `/readyz` returns `503` as soon as draining begins.
+
 To provide an existing certificate instead, set `tls.acme.enable = false` and
 configure `tls.certificateFile` and `tls.privateKeyFile`. Keep TLS keys, DNS
 credentials, and other secrets outside the Nix store and provide application

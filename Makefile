@@ -21,7 +21,7 @@ export TF_VAR_ssh_key_fingerprint := $(SSH_KEY_FINGERPRINT)
 .PHONY: help check-token check-ip init register-key plan create provision ip \
 	wait-for-nixos pull-host-config install-acme-token verify-acme-token deploy \
 	deploy-local-build deploy-dry build-host build check update ssh status \
-	logs acme-logs prometheus-logs grafana-logs alert-logs tor-logs website health metrics smoke prometheus grafana alerts dns destroy
+	logs acme-logs prometheus-logs grafana-logs alert-logs tor-logs website health ready metrics smoke prometheus grafana alerts dns destroy
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -193,6 +193,10 @@ health: ## Check the public relay health endpoint.
 	curl --fail --silent --show-error https://relay.zapptunnel.com/healthz
 	@echo
 
+ready: ## Check whether the public relay is accepting new admissions.
+	curl --fail --silent --show-error https://relay.zapptunnel.com/readyz
+	@echo
+
 website: ## Check the public documentation and demo site.
 	curl --fail --silent --show-error https://zapptunnel.com/ | grep -Fq '<title>Zaptunnel — your node, from anywhere</title>'
 	@echo "Zaptunnel website is available."
@@ -204,7 +208,7 @@ smoke: ## Wait for DNS/ACME, then verify HTTPS health and Prometheus exposition.
 	@for attempt in $$(seq 1 60); do \
 		if curl --fail --silent https://zapptunnel.com/ 2>/dev/null | \
 			grep -Fq '<title>Zaptunnel — your node, from anywhere</title>' && \
-			curl --fail --silent https://relay.zapptunnel.com/healthz >/dev/null 2>&1 && \
+			curl --fail --silent https://relay.zapptunnel.com/readyz >/dev/null 2>&1 && \
 			curl --fail --silent https://relay.zapptunnel.com/metrics 2>/dev/null | \
 			grep -q '^zaptunnel_sessions'; then \
 			echo "Zaptunnel website, HTTPS relay, and metrics smoke checks passed."; \

@@ -40,6 +40,16 @@ defmodule ZaptunnelRelay.Router do
     relay_only(conn, fn conn -> json(conn, 200, %{status: "ok"}) end)
   end
 
+  get "/readyz" do
+    relay_only(conn, fn conn ->
+      if ZaptunnelRelay.Admission.ready?() do
+        json(conn, 200, %{status: "ready"})
+      else
+        json(conn, 503, %{status: "draining"})
+      end
+    end)
+  end
+
   get "/metrics" do
     relay_only(conn, fn conn ->
       conn
@@ -56,6 +66,7 @@ defmodule ZaptunnelRelay.Router do
     relay_only(conn, fn conn ->
       result =
         with :ok <- ZaptunnelRelay.RateLimiter.check(conn.remote_ip),
+             :ok <- ZaptunnelRelay.Admission.check_ready(),
              {:ok, node_id} <- validate_node_id(submitted_node_id),
              {:ok, parsed} <- ZaptunnelRelay.Address.parse(submitted_address),
              {:ok, pinned_address} <- resolve(parsed),
@@ -79,6 +90,7 @@ defmodule ZaptunnelRelay.Router do
         {:error, :connection_limit} -> json(conn, 429, %{error: "connection_limit"})
         {:error, :endpoint_unverified} -> json(conn, 422, %{error: "endpoint_unverified"})
         {:error, :relay_overloaded} -> json(conn, 503, %{error: "relay_overloaded"})
+        {:error, :relay_draining} -> json(conn, 503, %{error: "relay_draining"})
         {:error, :onion_unavailable} -> json(conn, 503, %{error: "onion_unavailable"})
         {:error, :non_public_address} -> json(conn, 400, %{error: "non_public_address"})
         {:error, _reason} -> json(conn, 400, %{error: "invalid_connection_request"})
@@ -222,6 +234,7 @@ defmodule ZaptunnelRelay.Router do
   defp admission_stage(:rate_limited), do: :rate_limit
   defp admission_stage(:connection_limit), do: :quota
   defp admission_stage(:relay_overloaded), do: :capacity
+  defp admission_stage(:relay_draining), do: :lifecycle
   defp admission_stage(:endpoint_unverified), do: :verification
   defp admission_stage(:non_public_address), do: :address_policy
 

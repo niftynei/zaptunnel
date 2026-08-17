@@ -176,7 +176,8 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `unsupported_cln_version` | A version requirement was not met |
 
 Relay admission errors use the same base class. Current codes include
-`rate_limited`, `connection_limit`, `endpoint_unverified`, `onion_unavailable`, and
+`rate_limited`, `connection_limit`, `endpoint_unverified`, `onion_unavailable`,
+`relay_draining`, and
 `relay_overloaded`. Code should branch on `error.code`, not message text:
 
 ```ts

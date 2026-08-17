@@ -57,6 +57,7 @@ defmodule ZaptunnelRelay.MetricsTest do
     assert body =~ ~s(zaptunnel_forwarded_bytes_total{direction="node_to_browser"} 34)
     assert body =~ ~s(zaptunnel_sessions{state="active"} 1)
     assert body =~ "zaptunnel_session_capacity 10000"
+    assert body =~ "zaptunnel_ready 1"
     refute body =~ @node_id
 
     Process.exit(owner, :kill)

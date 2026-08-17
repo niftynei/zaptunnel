@@ -51,6 +51,20 @@ defmodule ZaptunnelRelay.AdmissionTest do
              Admission.issue("02" <> String.duplicate("33", 32), @address)
   end
 
+  test "draining rejects new admissions while preserving existing tickets and sessions" do
+    assert {:ok, ticket} = Admission.issue(@node_id, @address)
+    assert Admission.ready?()
+
+    assert :ok = Admission.begin_drain()
+    refute Admission.ready?()
+    assert %{draining: true, pending: 1, total: 1} = Admission.stats()
+    assert {:error, :relay_draining} = Admission.issue(@node_id, @address)
+
+    owner = spawn(fn -> Process.sleep(:infinity) end)
+    assert {:ok, %{node_id: @node_id}} = Admission.claim(ticket, owner)
+    Process.exit(owner, :kill)
+  end
+
   defp eventually(assertion, attempts \\ 20)
 
   defp eventually(assertion, attempts) when attempts > 0 do

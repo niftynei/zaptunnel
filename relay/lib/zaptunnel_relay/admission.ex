@@ -19,18 +19,33 @@ defmodule ZaptunnelRelay.Admission do
     GenServer.call(__MODULE__, :stats)
   end
 
+  def begin_drain do
+    GenServer.call(__MODULE__, :begin_drain)
+  end
+
+  def ready? do
+    GenServer.call(__MODULE__, :ready?)
+  end
+
+  def check_ready do
+    GenServer.call(__MODULE__, :check_ready)
+  end
+
   def reset do
     GenServer.call(__MODULE__, :reset)
   end
 
   @impl true
   def init(_opts) do
-    {:ok, %{tickets: %{}, active: %{}, counts: %{}, total: 0}}
+    {:ok, %{tickets: %{}, active: %{}, counts: %{}, total: 0, draining: false}}
   end
 
   @impl true
   def handle_call({:issue, node_id, address}, _from, state) do
     cond do
+      state.draining ->
+        {:reply, {:error, :relay_draining}, state}
+
       state.total >= Application.fetch_env!(:zaptunnel_relay, :max_total_sessions) ->
         {:reply, {:error, :relay_overloaded}, state}
 
@@ -58,13 +73,28 @@ defmodule ZaptunnelRelay.Admission do
   def handle_call(:reset, _from, state) do
     Enum.each(state.tickets, fn {_ticket, entry} -> Process.cancel_timer(entry.timer) end)
     Enum.each(state.active, fn {ref, _node_id} -> Process.demonitor(ref, [:flush]) end)
-    {:reply, :ok, %{tickets: %{}, active: %{}, counts: %{}, total: 0}}
+    {:reply, :ok, %{tickets: %{}, active: %{}, counts: %{}, total: 0, draining: false}}
   end
+
+  def handle_call(:begin_drain, _from, state) do
+    {:reply, :ok, %{state | draining: true}}
+  end
+
+  def handle_call(:ready?, _from, state), do: {:reply, not state.draining, state}
+
+  def handle_call(:check_ready, _from, %{draining: true} = state),
+    do: {:reply, {:error, :relay_draining}, state}
+
+  def handle_call(:check_ready, _from, state), do: {:reply, :ok, state}
 
   def handle_call(:stats, _from, state) do
     {:reply,
-     %{pending: map_size(state.tickets), active: map_size(state.active), total: state.total},
-     state}
+     %{
+       pending: map_size(state.tickets),
+       active: map_size(state.active),
+       total: state.total,
+       draining: state.draining
+     }, state}
   end
 
   def handle_call({:claim, ticket, owner}, _from, state) do

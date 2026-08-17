@@ -65,6 +65,7 @@ unless config_env() == :test do
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_WEBSOCKET_FRAME_BYTES", "65569")),
     session_idle_timeout_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_SESSION_IDLE_TIMEOUT_MS", "300000")),
+    drain_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_DRAIN_TIMEOUT_MS", "30000")),
     website_host: System.get_env("ZAPTUNNEL_WEBSITE_HOST"),
     relay_host: System.get_env("ZAPTUNNEL_RELAY_HOST"),
     tls: tls

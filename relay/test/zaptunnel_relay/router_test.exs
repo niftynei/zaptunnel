@@ -129,6 +129,23 @@ defmodule ZaptunnelRelay.RouterTest do
     assert get_resp_header(response, "cache-control") == ["no-store"]
   end
 
+  test "readiness and admission reflect graceful draining" do
+    ready = Router.call(conn(:get, "/readyz"), [])
+    assert ready.status == 200
+    assert %{"status" => "ready"} = Jason.decode!(ready.resp_body)
+
+    assert :ok = Admission.begin_drain()
+
+    draining = Router.call(conn(:get, "/readyz"), [])
+    assert draining.status == 503
+    assert %{"status" => "draining"} = Jason.decode!(draining.resp_body)
+
+    admission = post_connection()
+    assert admission.status == 503
+    assert %{"error" => "relay_draining"} = Jason.decode!(admission.resp_body)
+    refute_receive {:probe, _, _}
+  end
+
   defp post_connection(address \\ "127.0.0.1:9735") do
     :post
     |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: address}))

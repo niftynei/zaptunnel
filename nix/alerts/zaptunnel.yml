@@ -10,6 +10,15 @@ groups:
           summary: Zaptunnel relay metrics are unreachable
           description: Prometheus has been unable to scrape the relay for two minutes.
 
+      - alert: ZaptunnelRelayNotReady
+        expr: zaptunnel_ready{job="zapptunnel"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Zaptunnel relay is not accepting admissions
+          description: The relay has remained in draining mode for longer than a normal deployment.
+
       - alert: ZaptunnelTorDown
         expr: node_systemd_unit_state{job="node",name="tor.service",state="active"} != 1
         for: 2m

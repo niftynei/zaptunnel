@@ -20,6 +20,7 @@ config :zaptunnel_relay,
   rate_limit_refill_ms: 1_000,
   max_websocket_frame_bytes: 65_569,
   session_idle_timeout_ms: 300_000,
+  drain_timeout_ms: 30_000,
   website_host: nil,
   relay_host: nil,
   tls: false

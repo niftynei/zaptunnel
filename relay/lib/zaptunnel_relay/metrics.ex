@@ -191,6 +191,8 @@ defmodule ZaptunnelRelay.Metrics do
       sample("zaptunnel_sessions{state=\"pending\"}", admission.pending),
       sample("zaptunnel_sessions{state=\"active\"}", admission.active),
       sample("zaptunnel_sessions{state=\"total\"}", admission.total),
+      help("zaptunnel_ready", "Whether the relay accepts new admissions", "gauge"),
+      sample("zaptunnel_ready", if(admission.draining, do: 0, else: 1)),
       help("zaptunnel_session_capacity", "Configured global session capacity", "gauge"),
       sample(
         "zaptunnel_session_capacity",

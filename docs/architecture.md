@@ -101,6 +101,14 @@ econnrefused`, `bolt8_handshake / authentication_failed`, `init / timeout`, or
 IDs are abbreviated, and runes, RPC payloads, Lightning packets, and browser
 credentials are never logged.
 
+`GET /healthz` is a liveness check; `GET /readyz` reports whether the process
+is accepting new admissions. On graceful shutdown the application first marks
+admission as draining, so readiness becomes `503` and new tickets receive
+`relay_draining`. Previously issued tickets may still be claimed and existing
+sessions continue until they close or the configured drain deadline expires.
+The NixOS service gives the application additional stop time beyond that
+deadline before systemd terminates it.
+
 The relay serves Prometheus text exposition at `/metrics`. It reports
 aggregate admission outcomes, rate-limit rejections, endpoint verification
 results and duration, pending and active slots, session lifecycle, and byte

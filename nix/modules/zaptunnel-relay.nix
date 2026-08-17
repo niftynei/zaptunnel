@@ -125,6 +125,12 @@ in {
       description = "Host name that serves the relay HTTP and WebSocket API.";
     };
 
+    drainTimeoutSeconds = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 30;
+      description = "Maximum time to wait for pending and active sessions during shutdown.";
+    };
+
     tor = {
       enable = lib.mkEnableOption "connections to v3 onion-service node addresses through SOCKS5";
 
@@ -224,6 +230,7 @@ in {
             RELEASE_TMP = "/run/zaptunnel-relay";
             ZAPTUNNEL_LISTEN_ADDRESS = cfg.listenAddress;
             ZAPTUNNEL_WEB_PORT = toString cfg.webPort;
+            ZAPTUNNEL_DRAIN_TIMEOUT_MS = toString (cfg.drainTimeoutSeconds * 1000);
           }
           // lib.optionalAttrs cfg.tls.enable {
             ZAPTUNNEL_TLS_CERTFILE = certificateFile;
@@ -252,6 +259,7 @@ in {
             StateDirectory = "zaptunnel-relay";
             Restart = "on-failure";
             RestartSec = 5;
+            TimeoutStopSec = "${toString (cfg.drainTimeoutSeconds + 10)}s";
             UMask = "0077";
 
             AmbientCapabilities = lib.optional (cfg.webPort < 1024) "CAP_NET_BIND_SERVICE";
