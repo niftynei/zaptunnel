@@ -10,7 +10,13 @@ export DIGITALOCEAN_TOKEN
 
 TERRAFORM := $(shell if command -v terraform >/dev/null 2>&1; then printf 'terraform'; elif command -v tofu >/dev/null 2>&1; then printf 'tofu'; else printf 'nix develop --command tofu'; fi)
 NIXOS_REBUILD := $(shell if command -v nixos-rebuild >/dev/null 2>&1; then printf 'env TMPDIR=/tmp nixos-rebuild'; else printf 'nix develop --command env TMPDIR=/tmp nixos-rebuild'; fi)
-IP = $(shell cd terraform 2>/dev/null && $(TERRAFORM) output -raw ipv4 2>/dev/null)
+# State outputs do not require provider plugins. Reading the local state first
+# keeps deploy/status commands working after a safe removal of .terraform;
+# initialized or remote-backend setups fall back to the OpenTofu CLI.
+IP = $(shell cd terraform 2>/dev/null && { \
+	command -v jq >/dev/null 2>&1 && jq -er '.outputs.ipv4.value // empty' terraform.tfstate 2>/dev/null || \
+	$(TERRAFORM) output -raw ipv4 2>/dev/null; \
+})
 SSH := ssh -o StrictHostKeyChecking=accept-new
 SCP := scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
 HOST_COPY_ATTEMPTS ?= 12
@@ -37,7 +43,7 @@ check-token:
 check-ip:
 	@if [ -z "$(IP)" ]; then \
 		echo "ERROR: Terraform has no Zaptunnel droplet IP." >&2; \
-		echo "Run 'make create' first." >&2; \
+		echo "Run 'make create' first, or restore/initialize the existing Terraform state." >&2; \
 		exit 1; \
 	fi
 
