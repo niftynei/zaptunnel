@@ -15,6 +15,10 @@ defmodule ZaptunnelRelay.Admission do
     GenServer.call(__MODULE__, {:claim, ticket, owner})
   end
 
+  def stats do
+    GenServer.call(__MODULE__, :stats)
+  end
+
   def reset do
     GenServer.call(__MODULE__, :reset)
   end
@@ -55,6 +59,12 @@ defmodule ZaptunnelRelay.Admission do
     Enum.each(state.tickets, fn {_ticket, entry} -> Process.cancel_timer(entry.timer) end)
     Enum.each(state.active, fn {ref, _node_id} -> Process.demonitor(ref, [:flush]) end)
     {:reply, :ok, %{tickets: %{}, active: %{}, counts: %{}, total: 0}}
+  end
+
+  def handle_call(:stats, _from, state) do
+    {:reply,
+     %{pending: map_size(state.tickets), active: map_size(state.active), total: state.total},
+     state}
   end
 
   def handle_call({:claim, ticket, owner}, _from, state) do

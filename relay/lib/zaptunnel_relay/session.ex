@@ -17,6 +17,7 @@ defmodule ZaptunnelRelay.Session do
          ) do
       {:ok, socket} ->
         Logger.debug("session connected node_id=#{node_id} target=#{format_address(ip, port)}")
+        ZaptunnelRelay.Telemetry.emit([:session, :start], %{count: 1})
 
         {:ok,
          %{

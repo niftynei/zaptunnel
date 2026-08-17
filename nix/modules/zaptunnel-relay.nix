@@ -83,7 +83,7 @@ in {
         email = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
-          example = "admin@zapptunnel.com";
+          example = "niftynei+zaptunnel@gmail.com";
           description = "Contact email supplied to the ACME certificate authority.";
         };
 
@@ -109,6 +109,20 @@ in {
       type = lib.types.bool;
       default = false;
       description = "Open the configured listener port in the NixOS firewall.";
+    };
+
+    websiteHost = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "zapptunnel.com";
+      description = "Host name that serves the packaged documentation and demo site.";
+    };
+
+    relayHost = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "relay.zapptunnel.com";
+      description = "Host name that serves the relay HTTP and WebSocket API.";
     };
 
     environmentFile = lib.mkOption {
@@ -192,6 +206,12 @@ in {
           // lib.optionalAttrs cfg.tls.enable {
             ZAPTUNNEL_TLS_CERTFILE = certificateFile;
             ZAPTUNNEL_TLS_KEYFILE = privateKeyFile;
+          }
+          // lib.optionalAttrs (cfg.websiteHost != null) {
+            ZAPTUNNEL_WEBSITE_HOST = cfg.websiteHost;
+          }
+          // lib.optionalAttrs (cfg.relayHost != null) {
+            ZAPTUNNEL_RELAY_HOST = cfg.relayHost;
           }
           // cfg.environment;
 

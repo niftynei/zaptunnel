@@ -80,6 +80,12 @@ hits, rate-limit rejections, and per-session duration and byte counts. Error det
 from a failed network probe are intentionally collapsed into
 `endpoint_unverified` so that the API is less useful as a scanning oracle.
 
+The relay serves Prometheus text exposition at `/metrics`. It reports
+aggregate admission outcomes, rate-limit rejections, endpoint verification
+results and duration, pending and active slots, session lifecycle, and byte
+counts. Node IDs and addresses are never Prometheus labels: they would leak
+routing metadata and create an attacker-controlled cardinality problem.
+
 ## Free connection limit
 
 The first release permits at most **three concurrent sessions per destination
@@ -132,6 +138,12 @@ ACME service to issue `*.zapptunnel.com` (plus the zone apex) with DNS-01. The
 ACME unit owns issuance and renewal, grants the Zaptunnel group read access,
 and restarts the relay after renewal so Bandit loads the new files. DNS API
 credentials remain in runtime secret files and never enter the Nix store.
+
+The public website lives at `https://zapptunnel.com`; SDK admission and WSS
+traffic use `https://relay.zapptunnel.com`. Both names may resolve to the same
+Bandit listener. The apex-plus-wildcard certificate covers both, and the
+application can route the documentation site and relay API by HTTP Host
+without adding a reverse proxy.
 
 ## Deferred: CLNRest
 

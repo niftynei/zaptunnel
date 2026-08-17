@@ -3,31 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Zaptunnel vertical slice</title>
+    <meta name="description" content="Connect a browser to your Core Lightning node with an end-to-end encrypted Lightning connection." />
+    <meta name="theme-color" content="#171714" />
+    <title>Zaptunnel — your node, from anywhere</title>
   </head>
   <body>
-    <main>
-      <h1>Zaptunnel vertical slice</h1>
-      <p>Connect a browser to Core Lightning through the opaque relay.</p>
-
-      <form id="connect-form">
-        <label>
-          Node ID
-          <input id="node-id" name="node-id" required autocomplete="off" />
-        </label>
-        <label>
-          Address
-          <input id="address" name="address" value="127.0.0.1:9735" required autocomplete="off" />
-        </label>
-        <label>
-          Rune
-          <input id="rune" name="rune" required autocomplete="off" />
-        </label>
-        <button type="submit">Connect and call getinfo</button>
-      </form>
-
-      <pre id="status" data-testid="status">Ready</pre>
-    </main>
+    <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

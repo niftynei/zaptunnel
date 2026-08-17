@@ -3,11 +3,67 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
 
   @moduletag :integration
 
-  alias ZaptunnelRelay.EndpointProbe
+  alias ZaptunnelRelay.{Admission, EndpointProbe, EndpointVerifier, RateLimiter, Router}
 
   @wrong_node_id "028d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7"
 
   test "a real CLN peer accepts its node ID and rejects another" do
+    %{node_id: node_id, address: address} = start_cln()
+
+    assert :ok = EndpointProbe.verify(node_id, address, timeout: 5_000)
+
+    assert {:error, :endpoint_unverified} =
+             EndpointProbe.verify(@wrong_node_id, address, timeout: 2_000)
+  end
+
+  test "the packaged SDK connects through the relay and executes Commando getinfo" do
+    %{node_id: node_id, address: {{127, 0, 0, 1}, lightning_port}, lightning_dir: lightning_dir} =
+      start_cln()
+
+    %{"rune" => rune} =
+      command!("lightning-cli", lightning_cli_args(lightning_dir) ++ ["createrune"])
+      |> Jason.decode!()
+
+    previous_private = Application.fetch_env!(:zaptunnel_relay, :allow_private_addresses)
+    Application.put_env(:zaptunnel_relay, :allow_private_addresses, true)
+    Admission.reset()
+    EndpointVerifier.reset()
+    RateLimiter.reset()
+
+    {:ok, relay} =
+      Bandit.start_link(plug: Router, ip: {127, 0, 0, 1}, port: 0, startup_log: false)
+
+    Process.unlink(relay)
+
+    on_exit(fn ->
+      if Process.alive?(relay), do: Process.exit(relay, :shutdown)
+      Application.put_env(:zaptunnel_relay, :allow_private_addresses, previous_private)
+    end)
+
+    {:ok, {{127, 0, 0, 1}, relay_port}} = ThousandIsland.listener_info(relay)
+    script = sdk_e2e_script()
+
+    unless System.get_env("ZAPTUNNEL_SDK_E2E_SCRIPT") do
+      sdk_dir = Path.expand("../../../sdk", __DIR__)
+      assert {:ok, _output} = command("pnpm", ["--dir", sdk_dir, "build"])
+    end
+
+    assert {:ok, output} =
+             command("node", [
+               script,
+               "http://127.0.0.1:#{relay_port}",
+               node_id,
+               "127.0.0.1:#{lightning_port}",
+               rune
+             ])
+
+    assert %{"nodeId" => ^node_id, "browserPeerId" => browser_peer_id} =
+             output |> String.trim() |> Jason.decode!()
+
+    assert String.match?(browser_peer_id, ~r/^(02|03)[0-9a-f]{64}$/)
+  end
+
+  defp start_cln do
     root = Path.join(System.tmp_dir!(), "zaptunnel-cln-#{System.unique_integer([:positive])}")
     bitcoin_dir = Path.join(root, "bitcoin")
     lightning_dir = Path.join(root, "lightning")
@@ -50,10 +106,12 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
     node_id = info["id"]
     address = {{127, 0, 0, 1}, lightning_port}
 
-    assert :ok = EndpointProbe.verify(node_id, address, timeout: 5_000)
+    %{node_id: node_id, address: address, lightning_dir: lightning_dir}
+  end
 
-    assert {:error, :endpoint_unverified} =
-             EndpointProbe.verify(@wrong_node_id, address, timeout: 2_000)
+  defp sdk_e2e_script do
+    System.get_env("ZAPTUNNEL_SDK_E2E_SCRIPT") ||
+      Path.expand("../../../sdk/scripts/e2e.mjs", __DIR__)
   end
 
   defp start_bitcoind(directory, rpc_port, bitcoin_port) do
@@ -121,6 +179,13 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
       status == 0 -> {:ok, output}
       opts[:allow_failure] -> {:error, output}
       true -> flunk("#{executable} failed:\n#{output}")
+    end
+  end
+
+  defp command!(executable, args) do
+    case command(executable, args) do
+      {:ok, output} -> output
+      {:error, output} -> flunk("#{executable} failed:\n#{output}")
     end
   end
 

@@ -1,17 +1,32 @@
 {
   "name": "@zaptunnel/sdk",
   "version": "0.1.0",
-  "private": true,
+  "description": "End-to-end encrypted browser connections to Core Lightning through Zaptunnel",
   "type": "module",
+  "main": "./dist/lib/index.js",
+  "types": "./dist/lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib/index.d.ts",
+      "import": "./dist/lib/index.js"
+    }
+  },
+  "files": [
+    "dist/lib"
+  ],
   "scripts": {
-    "build": "tsc --noEmit && vite build",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
     "dev": "vite --host 127.0.0.1",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {
     "lnmessage": "0.2.9"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "svelte": "^5.56.9",
+    "svelte-check": "^4.7.6",
     "typescript": "~5.9.3",
     "vite": "~7.1.0"
   }

@@ -20,6 +20,8 @@ defmodule ZaptunnelRelay.RouterTest do
     Application.put_env(:zaptunnel_relay, :endpoint_probe_module, Probe)
     Application.put_env(:zaptunnel_relay, :router_test_pid, self())
     Application.put_env(:zaptunnel_relay, :router_test_probe_result, :ok)
+    previous_website_host = Application.get_env(:zaptunnel_relay, :website_host)
+    previous_relay_host = Application.get_env(:zaptunnel_relay, :relay_host)
     Admission.reset()
     EndpointVerifier.reset()
     RateLimiter.reset()
@@ -28,6 +30,8 @@ defmodule ZaptunnelRelay.RouterTest do
       Application.put_env(:zaptunnel_relay, :endpoint_probe_module, previous)
       Application.delete_env(:zaptunnel_relay, :router_test_pid)
       Application.delete_env(:zaptunnel_relay, :router_test_probe_result)
+      Application.put_env(:zaptunnel_relay, :website_host, previous_website_host)
+      Application.put_env(:zaptunnel_relay, :relay_host, previous_relay_host)
     end)
 
     :ok
@@ -47,6 +51,19 @@ defmodule ZaptunnelRelay.RouterTest do
     conn = post_connection()
     assert conn.status == 422
     assert Jason.decode!(conn.resp_body) == %{"error" => "endpoint_unverified"}
+  end
+
+  test "separates the website, relay, and unknown hosts" do
+    Application.put_env(:zaptunnel_relay, :website_host, "zapptunnel.com")
+    Application.put_env(:zaptunnel_relay, :relay_host, "relay.zapptunnel.com")
+
+    website = Router.call(%{conn(:get, "/healthz") | host: "zapptunnel.com"}, [])
+    relay = Router.call(%{conn(:get, "/healthz") | host: "relay.zapptunnel.com"}, [])
+    unknown = Router.call(%{conn(:get, "/healthz") | host: "other.example"}, [])
+
+    assert website.status == 404
+    assert relay.status == 200
+    assert unknown.status == 421
   end
 
   defp post_connection do
