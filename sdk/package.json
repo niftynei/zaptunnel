@@ -2,6 +2,20 @@
   "name": "@zaptunnel/sdk",
   "version": "0.1.0",
   "description": "End-to-end encrypted browser connections to Core Lightning through Zaptunnel",
+  "license": "MIT",
+  "homepage": "https://zapptunnel.com/#sdk",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/niftynei/zaptunnel.git",
+    "directory": "sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/niftynei/zaptunnel/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "main": "./dist/lib/index.js",
   "types": "./dist/lib/index.d.ts",
