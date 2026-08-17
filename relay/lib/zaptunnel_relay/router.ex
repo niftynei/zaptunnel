@@ -74,9 +74,8 @@ defmodule ZaptunnelRelay.Router do
                ZaptunnelRelay.EndpointVerifier.verify(node_id, pinned_address,
                  request_id: request_id
                ),
-             {:ok, ticket} <-
-               ZaptunnelRelay.Admission.issue(node_id, pinned_address, request_id: request_id) do
-          {:ok, ticket}
+             result <- admit(conn, node_id, pinned_address, request_id) do
+          result
         end
 
       ZaptunnelRelay.Telemetry.emit([:admission, :request], %{count: 1}, %{
@@ -86,15 +85,65 @@ defmodule ZaptunnelRelay.Router do
       log_admission(request_id, result, submitted_node_id, submitted_address)
 
       case result do
-        {:ok, ticket} -> json(conn, 201, %{websocket_path: "/v1/connect/#{ticket}"})
-        {:error, :rate_limited} -> json(conn, 429, %{error: "rate_limited"})
-        {:error, :connection_limit} -> json(conn, 429, %{error: "connection_limit"})
-        {:error, :endpoint_unverified} -> json(conn, 422, %{error: "endpoint_unverified"})
-        {:error, :relay_overloaded} -> json(conn, 503, %{error: "relay_overloaded"})
-        {:error, :relay_draining} -> json(conn, 503, %{error: "relay_draining"})
-        {:error, :onion_unavailable} -> json(conn, 503, %{error: "onion_unavailable"})
-        {:error, :non_public_address} -> json(conn, 400, %{error: "non_public_address"})
-        {:error, _reason} -> json(conn, 400, %{error: "invalid_connection_request"})
+        {:ok, ticket} ->
+          json(conn, 201, %{websocket_path: "/v1/connect/#{ticket}"})
+
+        {:ok, ticket, lease, receipt} ->
+          conn
+          |> put_resp_header("payment-receipt", receipt)
+          |> json(201, %{
+            lease: lease.token,
+            lease_expires_at: lease.expires_at,
+            websocket_path: "/v1/connect/#{ticket}"
+          })
+
+        {:payment_required, challenge} ->
+          payment_required(conn, challenge)
+
+        {:error, :rate_limited} ->
+          json(conn, 429, %{error: "rate_limited"})
+
+        {:error, :connection_limit} ->
+          json(conn, 429, %{error: "connection_limit"})
+
+        {:error, :lease_in_use} ->
+          json(conn, 409, %{error: "lease_in_use"})
+
+        {:error, reason} when reason in [:invalid_lease, :lease_node_mismatch] ->
+          json(conn, 401, %{error: Atom.to_string(reason)})
+
+        {:error, reason}
+        when reason in [
+               :malformed_payment_credential,
+               :unsupported_payment_credential,
+               :invalid_payment_token,
+               :invalid_preimage,
+               :unknown_challenge,
+               :challenge_mismatch,
+               :payment_expired
+             ] ->
+          json(conn, 402, %{error: Atom.to_string(reason)})
+
+        {:error, :billing_unavailable} ->
+          json(conn, 503, %{error: "billing_unavailable"})
+
+        {:error, :endpoint_unverified} ->
+          json(conn, 422, %{error: "endpoint_unverified"})
+
+        {:error, :relay_overloaded} ->
+          json(conn, 503, %{error: "relay_overloaded"})
+
+        {:error, :relay_draining} ->
+          json(conn, 503, %{error: "relay_draining"})
+
+        {:error, :onion_unavailable} ->
+          json(conn, 503, %{error: "onion_unavailable"})
+
+        {:error, :non_public_address} ->
+          json(conn, 400, %{error: "non_public_address"})
+
+        {:error, _reason} ->
+          json(conn, 400, %{error: "invalid_connection_request"})
       end
     end)
   end
@@ -125,7 +174,14 @@ defmodule ZaptunnelRelay.Router do
   defp cors(conn, _opts) do
     conn
     |> put_resp_header("access-control-allow-origin", "*")
-    |> put_resp_header("access-control-allow-headers", "content-type")
+    |> put_resp_header(
+      "access-control-allow-headers",
+      "authorization,content-type,x-zaptunnel-lease"
+    )
+    |> put_resp_header(
+      "access-control-expose-headers",
+      "payment-receipt,www-authenticate,x-request-id"
+    )
     |> put_resp_header("access-control-allow-methods", "GET,POST,OPTIONS")
   end
 
@@ -219,13 +275,89 @@ defmodule ZaptunnelRelay.Router do
     )
   end
 
+  defp admit(conn, node_id, address, request_id) do
+    lease = get_req_header(conn, "x-zaptunnel-lease") |> List.first()
+    authorization = get_req_header(conn, "authorization") |> List.first()
+
+    cond do
+      is_binary(lease) and ZaptunnelRelay.Payments.enabled?() ->
+        with {:ok, lease_id} <- ZaptunnelRelay.Payments.authorize_lease(lease, node_id) do
+          ZaptunnelRelay.Admission.issue(node_id, address,
+            request_id: request_id,
+            paid_lease: lease_id
+          )
+        end
+
+      is_binary(authorization) and ZaptunnelRelay.Payments.enabled?() ->
+        with {:ok, paid_lease, receipt} <- ZaptunnelRelay.Payments.redeem(authorization, node_id),
+             {:ok, ticket} <-
+               ZaptunnelRelay.Admission.issue(node_id, address,
+                 request_id: request_id,
+                 paid_lease: paid_lease.id
+               ) do
+          {:ok, ticket, paid_lease, receipt}
+        end
+
+      true ->
+        case ZaptunnelRelay.Admission.issue(node_id, address, request_id: request_id) do
+          {:error, :connection_limit} = limit ->
+            if ZaptunnelRelay.Payments.enabled?() do
+              case ZaptunnelRelay.Payments.challenge(node_id, conn.host) do
+                {:ok, challenge} -> {:payment_required, challenge}
+                {:error, _reason} -> {:error, :billing_unavailable}
+              end
+            else
+              limit
+            end
+
+          result ->
+            result
+        end
+    end
+  end
+
+  defp payment_required(conn, challenge) do
+    headers = Enum.map(challenge.www_authenticate, &{"www-authenticate", &1})
+
+    conn
+    |> prepend_resp_headers(headers)
+    |> put_resp_header("cache-control", "no-store")
+    |> json(402, %{
+      amount_sats: challenge.amount_sats,
+      error: "payment_required",
+      expires_at: challenge.expires_at,
+      invoice: challenge.invoice,
+      l402_token: challenge.l402_token,
+      mpp_challenge: challenge.mpp_challenge,
+      payment_hash: challenge.payment_hash,
+      payment_protocols: challenge.protocols,
+      quote_id: challenge.quote_id
+    })
+  end
+
   defp result_tag({:ok, _ticket}), do: :ok
+  defp result_tag({:ok, _ticket, _lease, _receipt}), do: :ok
+  defp result_tag({:payment_required, _challenge}), do: {:error, :payment_required}
   defp result_tag({:error, reason}), do: {:error, reason}
 
   defp log_admission(request_id, {:ok, _ticket}, node_id, address) do
     Logger.info(
       "admission accepted request_id=#{request_id} node_id=#{abbreviate_node_id(node_id)} " <>
         "submitted_address=#{inspect_submitted(address)}"
+    )
+  end
+
+  defp log_admission(request_id, {:ok, _ticket, _lease, _receipt}, node_id, address) do
+    Logger.info(
+      "paid admission accepted request_id=#{request_id} node_id=#{abbreviate_node_id(node_id)} " <>
+        "submitted_address=#{inspect_submitted(address)}"
+    )
+  end
+
+  defp log_admission(request_id, {:payment_required, challenge}, node_id, address) do
+    Logger.info(
+      "admission payment required request_id=#{request_id} quote_id=#{challenge.quote_id} " <>
+        "node_id=#{abbreviate_node_id(node_id)} submitted_address=#{inspect_submitted(address)}"
     )
   end
 

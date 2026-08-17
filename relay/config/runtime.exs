@@ -37,6 +37,20 @@ unless config_env() == :test do
         raise "ZAPTUNNEL_TOR_SOCKS_ADDRESS and ZAPTUNNEL_TOR_SOCKS_PORT must be set together"
     end
 
+  payments_enabled = System.get_env("ZAPTUNNEL_PAYMENTS_ENABLED", "false") in ["1", "true"]
+  payment_token_secret = System.get_env("ZAPTUNNEL_PAYMENT_TOKEN_SECRET")
+  billing_node_id = System.get_env("ZAPTUNNEL_BILLING_NODE_ID")
+  billing_node_address = System.get_env("ZAPTUNNEL_BILLING_NODE_ADDRESS")
+  billing_node_rune = System.get_env("ZAPTUNNEL_BILLING_NODE_RUNE")
+
+  if payments_enabled and
+       Enum.any?(
+         [payment_token_secret, billing_node_id, billing_node_address, billing_node_rune],
+         &is_nil/1
+       ) do
+    raise "payment configuration requires ZAPTUNNEL_PAYMENT_TOKEN_SECRET, ZAPTUNNEL_BILLING_NODE_ID, ZAPTUNNEL_BILLING_NODE_ADDRESS, and ZAPTUNNEL_BILLING_NODE_RUNE"
+  end
+
   config :zaptunnel_relay,
     ip: ip,
     port: String.to_integer(System.get_env("ZAPTUNNEL_WEB_PORT", "4000")),
@@ -46,6 +60,20 @@ unless config_env() == :test do
     ticket_ttl_ms: String.to_integer(System.get_env("ZAPTUNNEL_TICKET_TTL_MS", "10000")),
     free_sessions_per_node:
       String.to_integer(System.get_env("ZAPTUNNEL_FREE_SESSIONS_PER_NODE", "3")),
+    payments_enabled: payments_enabled,
+    payment_price_sats: String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_PRICE_SATS", "10")),
+    payment_network: System.get_env("ZAPTUNNEL_PAYMENT_NETWORK", "mainnet"),
+    payment_quote_ttl_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_QUOTE_TTL_MS", "300000")),
+    payment_lease_ttl_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_LEASE_TTL_MS", "28800000")),
+    payment_invoice_timeout_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_INVOICE_TIMEOUT_MS", "10000")),
+    payment_token_secret: payment_token_secret || "development-only-zaptunnel-payment-secret",
+    payment_state_path: System.get_env("ZAPTUNNEL_PAYMENT_STATE_PATH"),
+    billing_node_id: billing_node_id,
+    billing_node_address: billing_node_address,
+    billing_node_rune: billing_node_rune,
     max_total_sessions:
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_TOTAL_SESSIONS", "10000")),
     connect_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_CONNECT_TIMEOUT_MS", "5000")),

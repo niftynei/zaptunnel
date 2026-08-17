@@ -33,6 +33,8 @@ defmodule ZaptunnelRelay.MetricsTest do
     )
 
     Telemetry.emit([:session, :start], %{count: 1})
+    Telemetry.emit([:payment, :challenge], %{count: 1}, %{result: :ok})
+    Telemetry.emit([:payment, :redeem], %{count: 1}, %{protocol: :mpp, result: :ok})
 
     Telemetry.emit(
       [:session, :stop],
@@ -57,6 +59,8 @@ defmodule ZaptunnelRelay.MetricsTest do
     assert body =~ ~s(zaptunnel_forwarded_bytes_total{direction="node_to_browser"} 34)
     assert body =~ ~s(zaptunnel_sessions{state="active"} 1)
     assert body =~ "zaptunnel_session_capacity 10000"
+    assert body =~ ~s(zaptunnel_payment_challenges_total{result="success"} 1)
+    assert body =~ ~s(zaptunnel_payment_redemptions_total{protocol="mpp",result="success"} 1)
     assert body =~ "zaptunnel_ready 1"
     refute body =~ @node_id
 

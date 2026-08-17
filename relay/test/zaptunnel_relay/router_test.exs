@@ -5,13 +5,25 @@ defmodule ZaptunnelRelay.RouterTest do
   import Plug.Test
   import ExUnit.CaptureLog
 
-  alias ZaptunnelRelay.{Admission, EndpointVerifier, RateLimiter, Router}
+  alias ZaptunnelRelay.{
+    Admission,
+    EndpointVerifier,
+    PaymentProtocol,
+    Payments,
+    RateLimiter,
+    Router
+  }
 
   defmodule Probe do
     def verify(node_id, address) do
       send(Application.fetch_env!(:zaptunnel_relay, :router_test_pid), {:probe, node_id, address})
       Application.get_env(:zaptunnel_relay, :router_test_probe_result, :ok)
     end
+  end
+
+  defmodule InvoiceProvider do
+    @behaviour ZaptunnelRelay.Billing.InvoiceProvider
+    def create_invoice(_opts), do: Application.fetch_env!(:zaptunnel_relay, :router_test_invoice)
   end
 
   @node_id "02" <> String.duplicate("11", 32)
@@ -24,7 +36,20 @@ defmodule ZaptunnelRelay.RouterTest do
     previous_website_host = Application.get_env(:zaptunnel_relay, :website_host)
     previous_relay_host = Application.get_env(:zaptunnel_relay, :relay_host)
     previous_tor_proxy = Application.get_env(:zaptunnel_relay, :tor_socks_proxy)
+
+    previous_payment =
+      for key <- [
+            :payments_enabled,
+            :invoice_provider,
+            :payment_token_secret,
+            :free_sessions_per_node
+          ],
+          into: %{} do
+        {key, Application.fetch_env!(:zaptunnel_relay, key)}
+      end
+
     Admission.reset()
+    Payments.reset()
     EndpointVerifier.reset()
     RateLimiter.reset()
 
@@ -35,6 +60,12 @@ defmodule ZaptunnelRelay.RouterTest do
       Application.put_env(:zaptunnel_relay, :website_host, previous_website_host)
       Application.put_env(:zaptunnel_relay, :relay_host, previous_relay_host)
       Application.put_env(:zaptunnel_relay, :tor_socks_proxy, previous_tor_proxy)
+
+      Enum.each(previous_payment, fn {key, value} ->
+        Application.put_env(:zaptunnel_relay, key, value)
+      end)
+
+      Application.delete_env(:zaptunnel_relay, :router_test_invoice)
     end)
 
     :ok
@@ -147,6 +178,74 @@ defmodule ZaptunnelRelay.RouterTest do
     assert admission.status == 503
     assert %{"error" => "relay_draining"} = Jason.decode!(admission.resp_body)
     refute_receive {:probe, _, _}
+  end
+
+  test "offers and redeems both payment formats after free slots are occupied" do
+    preimage = String.duplicate("11", 32)
+
+    payment_hash =
+      :crypto.hash(:sha256, Base.decode16!(preimage, case: :lower)) |> Base.encode16(case: :lower)
+
+    Application.put_env(:zaptunnel_relay, :payments_enabled, true)
+    Application.put_env(:zaptunnel_relay, :free_sessions_per_node, 0)
+    Application.put_env(:zaptunnel_relay, :invoice_provider, InvoiceProvider)
+    Application.put_env(:zaptunnel_relay, :payment_token_secret, String.duplicate("k", 32))
+
+    Application.put_env(
+      :zaptunnel_relay,
+      :router_test_invoice,
+      {:ok,
+       %{
+         invoice: "lnbc1test",
+         payment_hash: payment_hash,
+         expires_at: System.system_time(:second) + 300
+       }}
+    )
+
+    challenge = post_connection()
+    body = Jason.decode!(challenge.resp_body)
+    assert challenge.status == 402
+    assert body["payment_protocols"] == ["mpp", "l402"]
+    assert length(get_resp_header(challenge, "www-authenticate")) == 2
+    assert get_resp_header(challenge, "cache-control") == ["no-store"]
+
+    credential =
+      "Payment " <>
+        PaymentProtocol.encode(%{
+          "challenge" => body["mpp_challenge"],
+          "payload" => %{"preimage" => preimage}
+        })
+
+    paid =
+      :post
+      |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: "127.0.0.1:9735"}))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", credential)
+      |> Router.call([])
+
+    paid_body = Jason.decode!(paid.resp_body)
+    assert paid.status == 201
+    assert paid_body["lease"] =~ ~r/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
+    assert paid_body["websocket_path"] =~ ~r{^/v1/connect/}
+    assert [_receipt] = get_resp_header(paid, "payment-receipt")
+  end
+
+  test "payment credentials cannot bypass admission while payments are disabled" do
+    Application.put_env(:zaptunnel_relay, :payments_enabled, false)
+    Application.put_env(:zaptunnel_relay, :free_sessions_per_node, 0)
+
+    response =
+      :post
+      |> conn(
+        "/v1/connections",
+        Jason.encode!(%{node_id: @node_id, address: "127.0.0.1:9735"})
+      )
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-zaptunnel-lease", "attacker-controlled")
+      |> Router.call([])
+
+    assert response.status == 429
+    assert %{"error" => "connection_limit"} = Jason.decode!(response.resp_body)
   end
 
   defp post_connection(address \\ "127.0.0.1:9735") do

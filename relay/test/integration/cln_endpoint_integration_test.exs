@@ -4,6 +4,7 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
   @moduletag :integration
 
   alias ZaptunnelRelay.{Admission, EndpointProbe, EndpointVerifier, RateLimiter, Router}
+  alias ZaptunnelRelay.Billing.Commando
 
   @wrong_node_id "028d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7"
   @onion "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
@@ -15,6 +16,38 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
 
     assert {:error, {:bolt8_handshake, _reason}} =
              EndpointProbe.verify(@wrong_node_id, address, timeout: 2_000)
+  end
+
+  test "the billing client creates an invoice over real BOLT-8 Commando" do
+    %{node_id: node_id, address: {{127, 0, 0, 1}, lightning_port}, lightning_dir: lightning_dir} =
+      start_cln()
+
+    %{"rune" => rune} =
+      command!("lightning-cli", lightning_cli_args(lightning_dir) ++ ["createrune"])
+      |> Jason.decode!()
+
+    assert {:ok,
+            %{
+              "bolt11" => "lnbcrt" <> _,
+              "payment_hash" => payment_hash,
+              "expires_at" => expires_at
+            }} =
+             Commando.call(
+               "invoice",
+               %{
+                 amount_msat: 10_000,
+                 description: "Zaptunnel integration test",
+                 expiry: 60,
+                 label: "zaptunnel-billing-#{System.unique_integer([:positive])}"
+               },
+               address: "127.0.0.1:#{lightning_port}",
+               node_id: node_id,
+               rune: rune,
+               timeout: 5_000
+             )
+
+    assert payment_hash =~ ~r/^[0-9a-f]{64}$/
+    assert expires_at > System.system_time(:second)
   end
 
   test "the packaged SDK connects through SOCKS-routed onion admission and executes Commando getinfo" do

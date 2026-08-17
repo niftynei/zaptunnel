@@ -10,7 +10,9 @@ defmodule ZaptunnelRelay.Metrics do
     [:zaptunnel_relay, :verification, :cache_hit],
     [:zaptunnel_relay, :verification, :stop],
     [:zaptunnel_relay, :session, :start],
-    [:zaptunnel_relay, :session, :stop]
+    [:zaptunnel_relay, :session, :stop],
+    [:zaptunnel_relay, :payment, :challenge],
+    [:zaptunnel_relay, :payment, :redeem]
   ]
 
   def start_link(opts \\ []) do
@@ -65,7 +67,9 @@ defmodule ZaptunnelRelay.Metrics do
       session_duration_ms: 0,
       session_duration_count: 0,
       browser_bytes: 0,
-      node_bytes: 0
+      node_bytes: 0,
+      payment_challenges: %{},
+      payment_redemptions: %{}
     }
   end
 
@@ -111,9 +115,22 @@ defmodule ZaptunnelRelay.Metrics do
     |> Map.update!(:node_bytes, &(&1 + measurements[:bytes_from_node]))
   end
 
+  defp record(state, [:zaptunnel_relay, :payment, :challenge], measurements, metadata) do
+    update_in(
+      state.payment_challenges,
+      &increment_by(&1, result_label(metadata[:result]), measurements[:count])
+    )
+  end
+
+  defp record(state, [:zaptunnel_relay, :payment, :redeem], measurements, metadata) do
+    label = "#{metadata[:protocol]}:#{result_label(metadata[:result])}"
+    update_in(state.payment_redemptions, &increment_by(&1, label, measurements[:count]))
+  end
+
   defp record(state, _event, _measurements, _metadata), do: state
 
   defp increment(values, key), do: Map.update(values, key, 1, &(&1 + 1))
+  defp increment_by(values, key, count), do: Map.update(values, key, count, &(&1 + count))
 
   defp admission_result(:ok), do: "accepted"
   defp admission_result({:error, reason}), do: Atom.to_string(reason)
@@ -191,6 +208,18 @@ defmodule ZaptunnelRelay.Metrics do
       sample("zaptunnel_sessions{state=\"pending\"}", admission.pending),
       sample("zaptunnel_sessions{state=\"active\"}", admission.active),
       sample("zaptunnel_sessions{state=\"total\"}", admission.total),
+      help(
+        "zaptunnel_payment_challenges_total",
+        "Connection payment challenges by outcome",
+        "counter"
+      ),
+      labelled("zaptunnel_payment_challenges_total", "result", metrics.payment_challenges),
+      help(
+        "zaptunnel_payment_redemptions_total",
+        "Connection payment redemptions by protocol and outcome",
+        "counter"
+      ),
+      payment_redemptions(metrics.payment_redemptions),
       help("zaptunnel_ready", "Whether the relay accepts new admissions", "gauge"),
       sample("zaptunnel_ready", if(admission.draining, do: 0, else: 1)),
       help("zaptunnel_session_capacity", "Configured global session capacity", "gauge"),
@@ -217,6 +246,19 @@ defmodule ZaptunnelRelay.Metrics do
     |> Enum.map(fn {{stage, reason}, count} ->
       sample(
         ~s(zaptunnel_endpoint_verification_failures_total{stage="#{stage}",reason="#{reason}"}),
+        count
+      )
+    end)
+  end
+
+  defp payment_redemptions(values) do
+    values
+    |> Enum.sort()
+    |> Enum.map(fn {label, count} ->
+      [protocol, result] = String.split(label, ":", parts: 2)
+
+      sample(
+        ~s(zaptunnel_payment_redemptions_total{protocol="#{protocol}",result="#{result}"}),
         count
       )
     end)

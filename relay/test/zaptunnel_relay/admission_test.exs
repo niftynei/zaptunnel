@@ -63,6 +63,24 @@ defmodule ZaptunnelRelay.AdmissionTest do
              Admission.issue("02" <> String.duplicate("33", 32), @address)
   end
 
+  test "a paid lease bypasses the free-node limit but cannot be used concurrently" do
+    for _index <- 1..3, do: assert({:ok, _ticket} = Admission.issue(@node_id, @address))
+
+    assert {:ok, paid_ticket} =
+             Admission.issue(@node_id, @address, paid_lease: "zl_paid")
+
+    assert {:error, :lease_in_use} =
+             Admission.issue(@node_id, @address, paid_lease: "zl_paid")
+
+    owner = spawn(fn -> Process.sleep(:infinity) end)
+    assert {:ok, _target} = Admission.claim(paid_ticket, owner)
+    Process.exit(owner, :kill)
+
+    eventually(fn ->
+      match?({:ok, _ticket}, Admission.issue(@node_id, @address, paid_lease: "zl_paid"))
+    end)
+  end
+
   test "draining rejects new admissions while preserving existing tickets and sessions" do
     assert {:ok, ticket} = Admission.issue(@node_id, @address)
     assert Admission.ready?()

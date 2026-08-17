@@ -131,6 +131,47 @@ in {
       description = "Maximum time to wait for pending and active sessions during shutdown.";
     };
 
+    payments = {
+      enable = lib.mkEnableOption "MPP and L402 Lightning payments for additional connections";
+
+      priceSats = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 10;
+        description = "Price of one additional reconnect-safe connection lease, in satoshis.";
+      };
+
+      network = lib.mkOption {
+        type = lib.types.enum ["mainnet" "regtest" "signet"];
+        default = "mainnet";
+        description = "Lightning network advertised in MPP payment challenges.";
+      };
+
+      quoteTtlSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 300;
+        description = "Maximum lifetime of a connection payment challenge.";
+      };
+
+      leaseTtlSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 28800;
+        description = "Lifetime of a paid logical connection lease, including reconnects.";
+      };
+
+      billingNodeId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Compressed public key of the dedicated CLN billing node.";
+      };
+
+      billingNodeAddress = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "billing.example.com:9735";
+        description = "Lightning peer address used for direct BOLT-8 Commando billing RPC.";
+      };
+    };
+
     tor = {
       enable = lib.mkEnableOption "connections to v3 onion-service node addresses through SOCKS5";
 
@@ -197,6 +238,18 @@ in {
             || (cfg.tls.certificateFile != null && cfg.tls.privateKeyFile != null);
           message = "certificateFile and privateKeyFile are required when TLS is enabled without ACME";
         }
+        {
+          assertion = !cfg.payments.enable || cfg.payments.billingNodeId != null;
+          message = "services.zaptunnel-relay.payments.billingNodeId is required when payments are enabled";
+        }
+        {
+          assertion = !cfg.payments.enable || cfg.payments.billingNodeAddress != null;
+          message = "services.zaptunnel-relay.payments.billingNodeAddress is required when payments are enabled";
+        }
+        {
+          assertion = !cfg.payments.enable || cfg.environmentFile != null;
+          message = "payments require environmentFile containing ZAPTUNNEL_BILLING_NODE_RUNE and ZAPTUNNEL_PAYMENT_TOKEN_SECRET";
+        }
       ];
 
       users.users = lib.mkIf (cfg.user == "zaptunnel") {
@@ -245,6 +298,16 @@ in {
           // lib.optionalAttrs cfg.tor.enable {
             ZAPTUNNEL_TOR_SOCKS_ADDRESS = cfg.tor.socksAddress;
             ZAPTUNNEL_TOR_SOCKS_PORT = toString cfg.tor.socksPort;
+          }
+          // lib.optionalAttrs cfg.payments.enable {
+            ZAPTUNNEL_PAYMENTS_ENABLED = "true";
+            ZAPTUNNEL_PAYMENT_PRICE_SATS = toString cfg.payments.priceSats;
+            ZAPTUNNEL_PAYMENT_NETWORK = cfg.payments.network;
+            ZAPTUNNEL_PAYMENT_QUOTE_TTL_MS = toString (cfg.payments.quoteTtlSeconds * 1000);
+            ZAPTUNNEL_PAYMENT_LEASE_TTL_MS = toString (cfg.payments.leaseTtlSeconds * 1000);
+            ZAPTUNNEL_PAYMENT_STATE_PATH = "/var/lib/zaptunnel-relay/payments.dets";
+            ZAPTUNNEL_BILLING_NODE_ID = cfg.payments.billingNodeId;
+            ZAPTUNNEL_BILLING_NODE_ADDRESS = cfg.payments.billingNodeAddress;
           }
           // cfg.environment;
 

@@ -9,6 +9,7 @@ defmodule ZaptunnelRelay.Application do
     children =
       [
         ZaptunnelRelay.Admission,
+        ZaptunnelRelay.Payments,
         ZaptunnelRelay.Metrics,
         ZaptunnelRelay.RateLimiter,
         {Task.Supervisor, name: ZaptunnelRelay.ProbeSupervisor},

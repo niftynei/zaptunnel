@@ -17,6 +17,8 @@ The current vertical slice includes:
 - relay-initiated BOLT-8 endpoint verification with `init` and `ping`/`pong`;
 - deduplicated verification caching and bounded verification concurrency;
 - a three-connection limit per destination node ID;
+- optional application-paid connection leases offered through both MPP
+  Lightning and L402, backed by a restricted Commando billing connection;
 - public-address validation, DNS pinning, and v3 onion routing through Tor;
 - request rate limiting and bounded frames;
 - opaque, bidirectional WebSocket-to-TCP forwarding;
@@ -124,7 +126,7 @@ nix build .#sdk
 
 Prometheus can scrape `GET /metrics` on the relay listener. Metrics cover
 admission outcomes, rate limiting, endpoint verification, pending and active
-sessions, duration, and forwarded byte counts. Node IDs are deliberately not
+sessions, payment challenges and redemptions, duration, and forwarded byte counts. Node IDs are deliberately not
 used as metric labels. Admission responses include an `X-Request-ID` for
 correlation with private structured logs; public errors remain intentionally
 generic. The DigitalOcean NixOS configuration also provisions a private
@@ -133,6 +135,19 @@ SSH tunnel with `make grafana`.
 
 The development-only `ZAPTUNNEL_ALLOW_PRIVATE_ADDRESSES=true` setting must not
 be enabled on a public relay.
+
+Payment support is disabled by default. The NixOS module's `payments` section
+configures the price, lease lifetime, and dedicated CLN billing node. Put only
+the two secrets below in the service's `environmentFile`; never place them in
+`flake.nix` or another Nix-store input:
+
+```text
+ZAPTUNNEL_BILLING_NODE_RUNE=<invoice-only rune>
+ZAPTUNNEL_PAYMENT_TOKEN_SECRET=<at least 32 random bytes>
+```
+
+The relay connects directly to the configured billing node over BOLT-8 and
+uses Commando to call `invoice`. It does not route billing through itself.
 
 See [the architecture](docs/architecture.md) and
 [Nix deployment notes](docs/nix.md) for the current design boundaries.
