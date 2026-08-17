@@ -39,6 +39,34 @@ type ListFunds = { channels: Array<{ peer_id: string; connected: boolean }> };
 const funds = await node.call<ListFunds>("listfunds");
 ```
 
+### Gossip suppression
+
+After every BOLT-8 initialization (including automatic reconnects), the SDK
+sends a BOLT 7 `gossip_timestamp_filter` with `first_timestamp = 0xffffffff`
+and `timestamp_range = 0`. Zaptunnel uses the connection for Commando rather
+than network routing, so it does not request relayed historical or ongoing
+gossip that the browser would otherwise decrypt and discard.
+
+The SDK uses the first chain hash advertised by the node's BOLT `networks` init
+TLV. Bitcoin mainnet is the protocol default when that TLV is absent. A
+non-mainnet node that omits `networks` can be configured explicitly with its
+unreversed, wire-order hash:
+
+```ts
+const node = await connect({
+  nodeId,
+  address,
+  rune,
+  chainHash: regtestChainHash
+});
+```
+
+The filter affects future *relayed* gossip. BOLT 7 permits a node to send
+announcements it generated itself regardless of the filter, so the SDK still
+safely ignores unsolicited gossip messages that arrive. This behavior is
+entirely end-to-end between the browser and CLN; the relay remains unaware of
+the message.
+
 An individual call can override the default rune and set local controls:
 
 ```ts
@@ -138,6 +166,8 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `request_timeout` | The SDK stopped waiting at the local deadline |
 | `request_aborted` | The supplied `AbortSignal` was aborted |
 | `connection_failed` | CLN could not complete the requested connection |
+| `invalid_chain_hash` | `chainHash` is not a 32-byte hexadecimal BOLT chain hash |
+| `gossip_filter_failed` | The initialized transport could not send its BOLT 7 filter |
 | `rpc_failed` | Another CLN RPC failure |
 | `unsupported_method` | A capability requirement was not met |
 | `unsupported_cln_version` | A version requirement was not met |
@@ -170,6 +200,7 @@ the Zaptunnel relay.
 ## Recommended references
 
 - [Core Lightning RPC reference](https://docs.corelightning.org/reference/)
+- [BOLT 7 gossip and `gossip_timestamp_filter`](https://github.com/lightning/bolts/blob/master/07-routing-gossip.md#the-gossip_timestamp_filter-message)
 - [Commando RPC](https://docs.corelightning.org/reference/commando) and [Commando plugin guide](https://docs.corelightning.org/docs/commando-plugin)
 - [`waitanyinvoice`](https://docs.corelightning.org/reference/waitanyinvoice), [`waitinvoice`](https://docs.corelightning.org/reference/waitinvoice), and [`wait`](https://docs.corelightning.org/reference/wait)
 - [CLN event notifications](https://docs.corelightning.org/docs/event-notifications)

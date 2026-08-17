@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BITCOIN_MAINNET_CHAIN_HASH,
   ClnCapabilities,
   compareClnVersions,
+  encodeRestrictiveGossipTimestampFilter,
+  extractInitChainHash,
   parseAddress,
   parseClnVersion,
   ZaptunnelClient,
@@ -24,6 +27,36 @@ function clientWith(commando, rune = "default-rune") {
     { nodeId, address: "node.example.com:9735", rune: rune ?? undefined }
   );
 }
+
+test("restrictive gossip filter uses the BOLT 7 no-gossip timestamp range", () => {
+  const message = encodeRestrictiveGossipTimestampFilter(BITCOIN_MAINNET_CHAIN_HASH);
+  const view = new DataView(message.buffer, message.byteOffset, message.byteLength);
+
+  assert.equal(message.length, 42);
+  assert.equal(view.getUint16(0), 265);
+  assert.equal(Buffer.from(message.subarray(2, 34)).toString("hex"), BITCOIN_MAINNET_CHAIN_HASH);
+  assert.equal(view.getUint32(34), 0xffff_ffff);
+  assert.equal(view.getUint32(38), 0);
+  assert.throws(
+    () => encodeRestrictiveGossipTimestampFilter("not-a-chain-hash"),
+    (error) => error instanceof ZaptunnelError && error.code === "invalid_chain_hash"
+  );
+});
+
+test("chain hash is learned from the BOLT init networks TLV", () => {
+  const regtestChainHash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
+  const init = Buffer.concat([
+    Buffer.from([0, 16]),
+    Buffer.from([0, 0]),
+    Buffer.from([0, 0]),
+    Buffer.from([1, 32]),
+    Buffer.from(regtestChainHash, "hex")
+  ]);
+
+  assert.equal(extractInitChainHash(init), regtestChainHash);
+  assert.equal(extractInitChainHash(Buffer.from([0, 18, 0, 0, 0, 0])), null);
+  assert.equal(extractInitChainHash(Buffer.from([0, 16, 0, 0, 0, 0, 1, 31])), null);
+});
 
 test("parseAddress accepts DNS, IPv4, and bracketed IPv6 endpoints", () => {
   assert.deepEqual(parseAddress("node.example.com:9735"), { host: "node.example.com", port: 9735 });

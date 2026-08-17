@@ -67,6 +67,13 @@ export type PaidInvoiceStreamOptions = Omit<WaitAnyInvoiceOptions, "timeoutMs" |
 };
 
 export const DEFAULT_RELAY = "https://relay.zapptunnel.com";
+export const BITCOIN_MAINNET_CHAIN_HASH =
+  "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000";
+
+const INIT_MESSAGE_TYPE = 16;
+const GOSSIP_TIMESTAMP_FILTER_MESSAGE_TYPE = 265;
+const NO_GOSSIP_FIRST_TIMESTAMP = 0xffff_ffff;
+const NO_GOSSIP_TIMESTAMP_RANGE = 0;
 
 export type ZaptunnelLogger = {
   info(message: string): void;
@@ -85,6 +92,12 @@ export type ConnectOptions = {
   rune?: string;
   /** Optional persistent BOLT-8 initiator private key, encoded as 32-byte hex. */
   privateKey?: string;
+  /**
+   * BOLT wire-order chain hash used by the restrictive gossip filter. The SDK
+   * normally learns this from the node's init message and otherwise defaults
+   * to Bitcoin mainnet. Set this for non-mainnet nodes that omit init networks.
+   */
+  chainHash?: string;
   /** Disable automatic lnmessage reconnects by default for deterministic app lifecycle. */
   reconnect?: boolean;
   logger?: ZaptunnelLogger;
@@ -177,10 +190,16 @@ export class ZaptunnelClient {
 
   #rune?: string;
   #transport: Lnmessage;
+  #disconnectCleanup?: () => void;
 
-  constructor(transport: Lnmessage, options: Pick<ConnectOptions, "nodeId" | "address" | "rune">) {
+  constructor(
+    transport: Lnmessage,
+    options: Pick<ConnectOptions, "nodeId" | "address" | "rune">,
+    disconnectCleanup?: () => void
+  ) {
     this.#transport = transport;
     this.#rune = options.rune;
+    this.#disconnectCleanup = disconnectCleanup;
     this.nodeId = options.nodeId;
     this.address = options.address;
     this.publicKey = transport.publicKey;
@@ -291,6 +310,8 @@ export class ZaptunnelClient {
   }
 
   disconnect(): void {
+    this.#disconnectCleanup?.();
+    this.#disconnectCleanup = undefined;
     this.#transport.disconnect();
   }
 }
@@ -298,6 +319,7 @@ export class ZaptunnelClient {
 /** Request admission and establish an end-to-end BOLT-8 session with CLN. */
 export async function connect(options: ConnectOptions): Promise<ZaptunnelClient> {
   validateNodeId(options.nodeId);
+  if (options.chainHash !== undefined) validateChainHash(options.chainHash);
   const { host, port } = parseAddress(options.address);
   const relay = parseRelay(options.relay ?? DEFAULT_RELAY);
   const admission = await requestAdmission(relay, options, globalThis.fetch);
@@ -313,6 +335,28 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     logger: options.logger
   });
 
+  let gossipFilterError: unknown;
+  const gossipSubscription = transport.decryptedMsgs$.subscribe((message) => {
+    if (readUint16(message, 0) !== INIT_MESSAGE_TYPE) return;
+
+    const chainHash =
+      options.chainHash?.toLowerCase() ?? extractInitChainHash(message) ?? BITCOIN_MAINNET_CHAIN_HASH;
+
+    try {
+      const BufferConstructor = message.constructor as unknown as {
+        from(bytes: Uint8Array): typeof message;
+      };
+      const plaintext = BufferConstructor.from(encodeRestrictiveGossipTimestampFilter(chainHash));
+      const encrypted = transport.noise.encryptMessage(plaintext);
+
+      if (!transport.socket) throw new Error("the Lightning socket is not available");
+      transport.socket.send(encrypted);
+    } catch (error) {
+      gossipFilterError = error;
+      options.logger?.error("Failed to send the restrictive BOLT 7 gossip filter");
+    }
+  });
+
   try {
     const connected = await transport.connect(options.reconnect ?? false);
 
@@ -322,8 +366,16 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
       });
     }
 
-    return new ZaptunnelClient(transport, options);
+    if (gossipFilterError) {
+      throw new ZaptunnelError("failed to configure the Lightning gossip filter", {
+        code: "gossip_filter_failed",
+        cause: gossipFilterError
+      });
+    }
+
+    return new ZaptunnelClient(transport, options, () => gossipSubscription.unsubscribe());
   } catch (error) {
+    gossipSubscription.unsubscribe();
     transport.disconnect();
 
     if (error instanceof ZaptunnelError) throw error;
@@ -332,6 +384,55 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
       cause: error
     });
   }
+}
+
+/** Encode a BOLT 7 filter that requests no relayed historical or future gossip. */
+export function encodeRestrictiveGossipTimestampFilter(chainHash: string): Uint8Array {
+  validateChainHash(chainHash);
+
+  const message = new Uint8Array(42);
+  const view = new DataView(message.buffer);
+  view.setUint16(0, GOSSIP_TIMESTAMP_FILTER_MESSAGE_TYPE);
+  message.set(hexToBytes(chainHash), 2);
+  view.setUint32(34, NO_GOSSIP_FIRST_TIMESTAMP);
+  view.setUint32(38, NO_GOSSIP_TIMESTAMP_RANGE);
+  return message;
+}
+
+/** Extract the first BOLT `networks` chain hash from an init message, if present. */
+export function extractInitChainHash(message: Uint8Array): string | null {
+  if (readUint16(message, 0) !== INIT_MESSAGE_TYPE) return null;
+
+  let offset = 2;
+  const globalFeaturesLength = readUint16(message, offset);
+  if (globalFeaturesLength === null) return null;
+  offset += 2 + globalFeaturesLength;
+
+  const localFeaturesLength = readUint16(message, offset);
+  if (localFeaturesLength === null) return null;
+  offset += 2 + localFeaturesLength;
+
+  while (offset < message.length) {
+    const type = readBigSize(message, offset);
+    if (!type) return null;
+    offset = type.nextOffset;
+
+    const length = readBigSize(message, offset);
+    if (!length || length.value > Number.MAX_SAFE_INTEGER) return null;
+    offset = length.nextOffset;
+
+    const end = offset + Number(length.value);
+    if (end > message.length) return null;
+
+    if (type.value === 1n) {
+      if (length.value < 32n || length.value % 32n !== 0n) return null;
+      return bytesToHex(message.subarray(offset, offset + 32));
+    }
+
+    offset = end;
+  }
+
+  return null;
 }
 
 async function requestAdmission(
@@ -417,6 +518,57 @@ function validateNodeId(nodeId: string): void {
       code: "invalid_node_id"
     });
   }
+}
+
+function validateChainHash(chainHash: string): void {
+  if (!/^[0-9a-f]{64}$/i.test(chainHash)) {
+    throw new ZaptunnelError("chainHash must be a 32-byte hexadecimal BOLT chain hash", {
+      code: "invalid_chain_hash"
+    });
+  }
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+
+  return bytes;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function readUint16(bytes: Uint8Array, offset: number): number | null {
+  if (offset < 0 || offset + 2 > bytes.length) return null;
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(offset);
+}
+
+function readBigSize(
+  bytes: Uint8Array,
+  offset: number
+): { value: bigint; nextOffset: number } | null {
+  if (offset < 0 || offset >= bytes.length) return null;
+
+  const prefix = bytes[offset];
+  if (prefix < 0xfd) return { value: BigInt(prefix), nextOffset: offset + 1 };
+
+  const width = prefix === 0xfd ? 2 : prefix === 0xfe ? 4 : 8;
+  if (offset + 1 + width > bytes.length) return null;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let value = 0n;
+  for (let index = 0; index < width; index += 1) {
+    value = (value << 8n) | BigInt(view.getUint8(offset + 1 + index));
+  }
+
+  const minimum = width === 2 ? 0xfdn : width === 4 ? 0x1_0000n : 0x1_0000_0000n;
+  if (value < minimum) return null;
+
+  return { value, nextOffset: offset + 1 + width };
 }
 
 export function parseClnVersion(raw: string): ClnVersion | null {
