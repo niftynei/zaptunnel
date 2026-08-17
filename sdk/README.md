@@ -63,6 +63,47 @@ addresses require a relay configured with Tor. Because CLN plugins and RPC
 methods vary independently of the core version, use `getCapabilities()` before
 depending on optional methods.
 
+## Paid connection leases
+
+The public relay allows three concurrent free connections to a destination
+node. When those slots are occupied, it can offer the same BOLT11 invoice as
+both an MPP Lightning `charge` challenge and an L402 challenge. Supply a wallet
+adapter to pay from the application side:
+
+```ts
+const node = createConnectionManager({
+  nodeId,
+  address,
+  rune,
+  payment: {
+    protocol: "auto", // prefers MPP; "mpp" and "l402" are also accepted
+    payInvoice: async (challenge) => {
+      showPrice(`${challenge.amountSats} sats`);
+      const result = await wallet.sendPayment(challenge.invoice);
+      return result.preimage;
+    }
+  }
+});
+```
+
+The callback must return the 32-byte payment preimage as lowercase hex. The SDK
+never receives wallet keys. After the relay verifies the proof, it returns a
+paid lease and the connection manager automatically uses that lease for later
+transport reconnects without paying again. A lease permits one concurrent
+logical connection and expires according to the relay's quoted terms.
+
+Without `payment.payInvoice`, admission throws
+`ZaptunnelPaymentRequiredError`. Its safe `challenge` property can be rendered
+as a QR code or passed to a separate payment UI. A wallet that does not return
+the preimage cannot complete the current automatic flow; settlement polling for
+external-wallet QR payments remains a future extension.
+
+The HTTP envelopes follow the evolving
+[MPP Lightning charge draft](https://paymentauth.org/draft-lightning-charge-00.html)
+and the [L402 protocol](https://docs.lightning.engineering/the-lightning-network/l402/protocol-specification).
+Both formats redeem the same relay quote and produce the same scoped lease; they
+do not create separate products or prices.
+
 ## Resilient connections
 
 Use a connection manager for long-lived web and mobile applications. Every
@@ -264,6 +305,11 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `request_timeout` | The SDK stopped waiting at the local deadline |
 | `request_aborted` | The supplied `AbortSignal` was aborted |
 | `connection_failed` | CLN could not complete the requested connection |
+| `payment_required` | Free slots are occupied and the relay offered a Lightning invoice |
+| `payment_failed` | The application wallet did not complete payment |
+| `invalid_preimage` | The supplied payment proof does not match the invoice |
+| `invalid_lease` | The paid lease is invalid, expired, or scoped to another node |
+| `lease_in_use` | The paid lease already has a pending or active connection |
 | `invalid_chain_hash` | `chainHash` is not a 32-byte hexadecimal BOLT chain hash |
 | `gossip_filter_failed` | The initialized transport could not send its BOLT 7 filter |
 | `rpc_failed` | Another CLN RPC failure |

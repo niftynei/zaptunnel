@@ -7,6 +7,8 @@
   streaming without automatic RPC replay.
 - Add structured connection troubleshooting, actionable demo failures, and
   detailed manager state snapshots with attempt and retry timing.
+- Add application-paid connection leases with MPP Lightning and L402 challenge
+  negotiation and automatic reconnect reuse.
 
 ## 0.3.0
 
