@@ -44,6 +44,7 @@
   services.zaptunnel-relay = {
     enable = true;
     openFirewall = true;
+    tor.enable = true;
     websiteHost = "zapptunnel.com";
     relayHost = "relay.zapptunnel.com";
 

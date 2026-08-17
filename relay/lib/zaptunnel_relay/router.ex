@@ -79,6 +79,7 @@ defmodule ZaptunnelRelay.Router do
         {:error, :connection_limit} -> json(conn, 429, %{error: "connection_limit"})
         {:error, :endpoint_unverified} -> json(conn, 422, %{error: "endpoint_unverified"})
         {:error, :relay_overloaded} -> json(conn, 503, %{error: "relay_overloaded"})
+        {:error, :onion_unavailable} -> json(conn, 503, %{error: "onion_unavailable"})
         {:error, :non_public_address} -> json(conn, 400, %{error: "non_public_address"})
         {:error, _reason} -> json(conn, 400, %{error: "invalid_connection_request"})
       end
@@ -192,7 +193,12 @@ defmodule ZaptunnelRelay.Router do
 
   defp resolve(parsed) do
     allow_private? = Application.fetch_env!(:zaptunnel_relay, :allow_private_addresses)
-    ZaptunnelRelay.Address.resolve(parsed, allow_private?: allow_private?)
+    allow_onion? = not is_nil(Application.get_env(:zaptunnel_relay, :tor_socks_proxy))
+
+    ZaptunnelRelay.Address.resolve(parsed,
+      allow_private?: allow_private?,
+      allow_onion?: allow_onion?
+    )
   end
 
   defp result_tag({:ok, _ticket}), do: :ok
@@ -218,6 +224,10 @@ defmodule ZaptunnelRelay.Router do
   defp admission_stage(:relay_overloaded), do: :capacity
   defp admission_stage(:endpoint_unverified), do: :verification
   defp admission_stage(:non_public_address), do: :address_policy
+
+  defp admission_stage(reason) when reason in [:onion_unavailable, :invalid_onion_address],
+    do: :address_policy
+
   defp admission_stage(reason) when reason in [:invalid_node_id, :invalid_address], do: :input
   defp admission_stage(reason) when reason in [:dns_timeout, :nxdomain, :eai_again], do: :dns
   defp admission_stage(_reason), do: :admission

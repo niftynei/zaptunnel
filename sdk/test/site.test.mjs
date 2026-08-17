@@ -67,6 +67,11 @@ test("the front page identifies Core Lightning compatibility without implying en
   assert.match(app, /independent project and is not affiliated with or endorsed/);
 });
 
+test("the connection form documents clearnet and v3 onion addresses", () => {
+  assert.match(app, /clearnet or v3 onion/);
+  assert.match(app, /\.onion:9735/);
+});
+
 test("the node ID pattern survives Svelte compilation and accepts a real compressed key", () => {
   const nodeId = "02cca6c5c966fcf61d121e3a70e03a1cd9eeeea024b26ea666ce974d43b242e636";
   const nodeIdPattern = /^(02|03)[0-9a-fA-F]{64}$/;

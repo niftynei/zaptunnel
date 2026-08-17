@@ -17,7 +17,8 @@ The current vertical slice includes:
 - relay-initiated BOLT-8 endpoint verification with `init` and `ping`/`pong`;
 - deduplicated verification caching and bounded verification concurrency;
 - a three-connection limit per destination node ID;
-- public-address validation, DNS pinning, request rate limiting, and bounded frames;
+- public-address validation, DNS pinning, and v3 onion routing through Tor;
+- request rate limiting and bounded frames;
 - opaque, bidirectional WebSocket-to-TCP forwarding;
 - a typed, importable TypeScript SDK built on `lnmessage`;
 - Prometheus metrics at `/metrics`; and
@@ -75,6 +76,9 @@ ZAPTUNNEL_ALLOW_PRIVATE_ADDRESSES=true mix run --no-halt
 
 The development override permits local CLN regtest endpoints, but endpoint
 verification still requires the supplied node ID to match the CLN listener.
+To use an existing Tor SOCKS5 proxy during development, set both
+`ZAPTUNNEL_TOR_SOCKS_ADDRESS` and `ZAPTUNNEL_TOR_SOCKS_PORT`. Onion hostnames
+are resolved by that proxy and are never submitted to local DNS.
 
 Build or serve the browser harness:
 

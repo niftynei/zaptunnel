@@ -2,6 +2,11 @@ defmodule ZaptunnelRelay.Address do
   @moduledoc false
 
   @type parsed :: %{host: String.t(), port: :inet.port_number()}
+  @type target ::
+          {:inet.ip_address(), :inet.port_number()}
+          | {:onion, String.t(), :inet.port_number()}
+
+  @onion_v3 ~r/^[a-z2-7]{56}\.onion$/
 
   @spec parse(String.t()) :: {:ok, parsed()} | {:error, :invalid_address}
   def parse(address) when is_binary(address) do
@@ -17,17 +22,51 @@ defmodule ZaptunnelRelay.Address do
 
   def parse(_address), do: {:error, :invalid_address}
 
-  @spec resolve(parsed(), keyword()) ::
-          {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, atom()}
+  @spec resolve(parsed(), keyword()) :: {:ok, target()} | {:error, atom()}
   def resolve(%{host: host, port: port}, opts \\ []) do
     allow_private? = Keyword.get(opts, :allow_private?, false)
+    allow_onion? = Keyword.get(opts, :allow_onion?, false)
 
-    with {:ok, ip} <- resolve_host(host),
-         true <- allow_private? or public?(ip) do
-      {:ok, {ip, port}}
+    normalized_host = String.downcase(host)
+
+    cond do
+      valid_onion_v3?(normalized_host) and allow_onion? ->
+        {:ok, {:onion, normalized_host, port}}
+
+      valid_onion_v3?(normalized_host) ->
+        {:error, :onion_unavailable}
+
+      onion_candidate?(normalized_host) ->
+        # Never send malformed or legacy onion names to the system resolver.
+        {:error, :invalid_onion_address}
+
+      true ->
+        with {:ok, ip} <- resolve_host(host),
+             true <- allow_private? or public?(ip) do
+          {:ok, {ip, port}}
+        else
+          false -> {:error, :non_public_address}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp onion_candidate?(host) do
+    host
+    |> String.trim_trailing(".")
+    |> String.ends_with?(".onion")
+  end
+
+  defp valid_onion_v3?(host) do
+    with true <- Regex.match?(@onion_v3, host),
+         label <- String.trim_trailing(host, ".onion"),
+         {:ok, <<public_key::binary-size(32), checksum::binary-size(2), 3>>} <-
+           Base.decode32(label, case: :mixed, padding: false),
+         <<expected::binary-size(2), _rest::binary>> <-
+           :crypto.hash(:sha3_256, ".onion checksum" <> public_key <> <<3>>) do
+      checksum == expected
     else
-      false -> {:error, :non_public_address}
-      {:error, reason} -> {:error, reason}
+      _invalid -> false
     end
   end
 

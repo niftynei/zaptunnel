@@ -6,6 +6,7 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
   alias ZaptunnelRelay.{Admission, EndpointProbe, EndpointVerifier, RateLimiter, Router}
 
   @wrong_node_id "028d7500dd4c12685d1f568b4c2b5048e8534b873319f3a8daa612b469132ec7f7"
+  @onion "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
 
   test "a real CLN peer accepts its node ID and rejects another" do
     %{node_id: node_id, address: address} = start_cln()
@@ -16,7 +17,7 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
              EndpointProbe.verify(@wrong_node_id, address, timeout: 2_000)
   end
 
-  test "the packaged SDK connects through the relay and executes Commando getinfo" do
+  test "the packaged SDK connects through SOCKS-routed onion admission and executes Commando getinfo" do
     %{node_id: node_id, address: {{127, 0, 0, 1}, lightning_port}, lightning_dir: lightning_dir} =
       start_cln()
 
@@ -25,7 +26,10 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
       |> Jason.decode!()
 
     previous_private = Application.fetch_env!(:zaptunnel_relay, :allow_private_addresses)
+    previous_tor_proxy = Application.get_env(:zaptunnel_relay, :tor_socks_proxy)
     Application.put_env(:zaptunnel_relay, :allow_private_addresses, true)
+    {socks_proxy, socks_port} = start_socks_proxy(lightning_port, self())
+    Application.put_env(:zaptunnel_relay, :tor_socks_proxy, {{127, 0, 0, 1}, socks_port})
     Admission.reset()
     EndpointVerifier.reset()
     RateLimiter.reset()
@@ -37,7 +41,9 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
 
     on_exit(fn ->
       if Process.alive?(relay), do: Process.exit(relay, :shutdown)
+      if Process.alive?(socks_proxy), do: Process.exit(socks_proxy, :kill)
       Application.put_env(:zaptunnel_relay, :allow_private_addresses, previous_private)
+      Application.put_env(:zaptunnel_relay, :tor_socks_proxy, previous_tor_proxy)
     end)
 
     {:ok, {{127, 0, 0, 1}, relay_port}} = ThousandIsland.listener_info(relay)
@@ -53,7 +59,7 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
                script,
                "http://127.0.0.1:#{relay_port}",
                node_id,
-               "127.0.0.1:#{lightning_port}",
+               "#{@onion}:9735",
                rune
              ])
 
@@ -61,6 +67,75 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
              output |> String.trim() |> Jason.decode!()
 
     assert String.match?(browser_peer_id, ~r/^(02|03)[0-9a-f]{64}$/)
+    assert_receive {:socks_request, @onion, 9_735}
+    assert_receive {:socks_request, @onion, 9_735}
+  end
+
+  defp start_socks_proxy(target_port, test_pid) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listener)
+
+    pid =
+      spawn_link(fn ->
+        socks_accept_loop(listener, target_port, test_pid)
+      end)
+
+    {pid, port}
+  end
+
+  defp socks_accept_loop(listener, target_port, test_pid) do
+    case :gen_tcp.accept(listener) do
+      {:ok, socket} ->
+        handler = spawn_link(fn -> socks_connection(target_port, test_pid) end)
+        :ok = :gen_tcp.controlling_process(socket, handler)
+        send(handler, {:socket, socket})
+        socks_accept_loop(listener, target_port, test_pid)
+
+      {:error, :closed} ->
+        :ok
+    end
+  end
+
+  defp socks_connection(target_port, test_pid) do
+    receive do
+      {:socket, socket} ->
+        {:ok, <<5, 1, 0>>} = :gen_tcp.recv(socket, 3, 2_000)
+        :ok = :gen_tcp.send(socket, <<5, 0>>)
+        {:ok, <<5, 1, 0, 3, length>>} = :gen_tcp.recv(socket, 5, 2_000)
+        {:ok, request} = :gen_tcp.recv(socket, length + 2, 2_000)
+        <<host::binary-size(length), requested_port::16>> = request
+        send(test_pid, {:socks_request, host, requested_port})
+
+        {:ok, target} =
+          :gen_tcp.connect({127, 0, 0, 1}, target_port, [:binary, active: false], 2_000)
+
+        :ok = :gen_tcp.send(socket, <<5, 0, 0, 1, 127, 0, 0, 1, target_port::16>>)
+        :ok = :inet.setopts(socket, active: :once)
+        :ok = :inet.setopts(target, active: :once)
+        socks_copy(socket, target)
+    end
+  end
+
+  defp socks_copy(left, right) do
+    receive do
+      {:tcp, ^left, data} ->
+        :ok = :gen_tcp.send(right, data)
+        :ok = :inet.setopts(left, active: :once)
+        socks_copy(left, right)
+
+      {:tcp, ^right, data} ->
+        :ok = :gen_tcp.send(left, data)
+        :ok = :inet.setopts(right, active: :once)
+        socks_copy(left, right)
+
+      {:tcp_closed, _socket} ->
+        :gen_tcp.close(left)
+        :gen_tcp.close(right)
+
+      {:tcp_error, _socket, _reason} ->
+        :gen_tcp.close(left)
+        :gen_tcp.close(right)
+    end
   end
 
   defp start_cln do

@@ -93,6 +93,15 @@ packaged Svelte documentation/demo at the former and the health, metrics,
 admission, and WebSocket endpoints at the latter. Requests for other host names
 receive `421 Misdirected Request`.
 
+Set `services.zaptunnel-relay.tor.enable = true` to accept v3 onion-service
+node addresses. By default the module runs a local Tor client on
+`127.0.0.1:9050`, configures an onion-only SOCKS listener with destination
+isolation, and orders the relay after `tor.service`. To use a separately
+managed SOCKS5 proxy, set `tor.manageService = false` and configure
+`tor.socksAddress` and `tor.socksPort`. Use `make status` to inspect both the
+relay and Tor units, or `make tor-logs` to follow Tor bootstrap and connection
+messages.
+
 To provide an existing certificate instead, set `tls.acme.enable = false` and
 configure `tls.certificateFile` and `tls.privateKeyFile`. Keep TLS keys, DNS
 credentials, and other secrets outside the Nix store and provide application

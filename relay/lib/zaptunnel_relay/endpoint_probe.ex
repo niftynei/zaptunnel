@@ -1,18 +1,19 @@
 defmodule ZaptunnelRelay.EndpointProbe do
   @moduledoc false
 
-  alias ZaptunnelRelay.Bolt8
+  alias ZaptunnelRelay.{Bolt8, Dialer}
 
   @init <<16::16, 0::16, 0::16>>
   @ping <<18::16, 16::16, 0::16>>
   @max_intervening_messages 256
 
-  def verify(node_id, {ip, port}, opts \\ []) do
+  def verify(node_id, target, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, probe_timeout())
     deadline = System.monotonic_time(:millisecond) + timeout
 
     with {:ok, remote_static} <- tagged(Base.decode16(node_id, case: :mixed), :node_id),
-         {:ok, socket} <- tagged(connect(ip, port, remaining(deadline)), :tcp_connect) do
+         {:ok, socket} <-
+           tagged(Dialer.connect(target, timeout: remaining(deadline)), :tcp_connect) do
       verify_protocol(socket, remote_static, deadline)
     else
       {:error, {_stage, _reason}} = error -> error
@@ -45,10 +46,6 @@ defmodule ZaptunnelRelay.EndpointProbe do
     after
       :gen_tcp.close(socket)
     end
-  end
-
-  defp connect(ip, port, timeout) do
-    :gen_tcp.connect(ip, port, [:binary, active: false, packet: :raw, nodelay: true], timeout)
   end
 
   defp await_message(_socket, _transport, _deadline, 0),

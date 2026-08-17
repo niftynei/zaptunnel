@@ -28,7 +28,10 @@ node.disconnect();
 ```
 
 The default relay is `https://relay.zapptunnel.com`. Set `relay` to use a
-self-hosted deployment. `call<T>(method, params)` supports every RPC method
+self-hosted deployment. `address` may be a public clearnet endpoint or a v3
+onion-service endpoint such as `<56 base32 characters>.onion:9735`; Tor routing
+is performed by the relay while BOLT-8 remains end-to-end. `call<T>(method,
+params)` supports every RPC method
 that the connected node exposes through Commando; the SDK does not maintain a
 version-specific copy of CLN's entire RPC schema. `getinfo`, `invoice`, and
 invoice waiting have typed convenience methods. Supply a response type to the
@@ -173,7 +176,7 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `unsupported_cln_version` | A version requirement was not met |
 
 Relay admission errors use the same base class. Current codes include
-`rate_limited`, `connection_limit`, `endpoint_unverified`, and
+`rate_limited`, `connection_limit`, `endpoint_unverified`, `onion_unavailable`, and
 `relay_overloaded`. Code should branch on `error.code`, not message text:
 
 ```ts

@@ -149,7 +149,7 @@ defmodule ZaptunnelRelay.EndpointVerifier do
   defp maybe_log_failure(_key, nil, _duration, _request_id, _cached?), do: :ok
 
   defp maybe_log_failure(
-         {node_id, {ip, port}},
+         {node_id, target},
          {stage, reason},
          duration,
          request_id,
@@ -158,7 +158,7 @@ defmodule ZaptunnelRelay.EndpointVerifier do
     Logger.warning(
       "endpoint verification failed request_id=#{format_request_id(request_id)} " <>
         "stage=#{stage} reason=#{reason} cached=#{cached?} " <>
-        "node_id=#{abbreviate(node_id)} target=#{format_address(ip, port)} duration_ms=#{duration}"
+        "node_id=#{abbreviate(node_id)} target=#{format_address(target)} duration_ms=#{duration}"
     )
   end
 
@@ -170,11 +170,13 @@ defmodule ZaptunnelRelay.EndpointVerifier do
 
   defp abbreviate(_node_id), do: "invalid"
 
-  defp format_address({_, _, _, _} = ip, port),
+  defp format_address({ip, port}) when tuple_size(ip) == 4,
     do: "#{:inet.ntoa(ip)}:#{port}"
 
-  defp format_address(ip, port),
+  defp format_address({ip, port}) when tuple_size(ip) == 8,
     do: "[#{:inet.ntoa(ip)}]:#{port}"
+
+  defp format_address({:onion, host, port}), do: "#{host}:#{port}"
 
   defp cache_ttl(:ok),
     do: Application.fetch_env!(:zaptunnel_relay, :verification_success_ttl_ms)

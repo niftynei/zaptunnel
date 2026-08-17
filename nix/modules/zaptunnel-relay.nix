@@ -125,6 +125,28 @@ in {
       description = "Host name that serves the relay HTTP and WebSocket API.";
     };
 
+    tor = {
+      enable = lib.mkEnableOption "connections to v3 onion-service node addresses through SOCKS5";
+
+      manageService = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Run a local Tor client and configure its dedicated onion-only SOCKS listener.";
+      };
+
+      socksAddress = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1";
+        description = "IP address of the Tor SOCKS5 listener used by the relay.";
+      };
+
+      socksPort = lib.mkOption {
+        type = lib.types.port;
+        default = 9050;
+        description = "Port of the Tor SOCKS5 listener used by the relay.";
+      };
+    };
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -213,6 +235,10 @@ in {
           // lib.optionalAttrs (cfg.relayHost != null) {
             ZAPTUNNEL_RELAY_HOST = cfg.relayHost;
           }
+          // lib.optionalAttrs cfg.tor.enable {
+            ZAPTUNNEL_TOR_SOCKS_ADDRESS = cfg.tor.socksAddress;
+            ZAPTUNNEL_TOR_SOCKS_PORT = toString cfg.tor.socksPort;
+          }
           // cfg.environment;
 
         serviceConfig =
@@ -251,6 +277,29 @@ in {
           // cfg.extraServiceConfig;
       };
     }
+
+    (lib.mkIf cfg.tor.enable {
+      systemd.services.zaptunnel-relay = {
+        after = lib.optional cfg.tor.manageService "tor.service";
+        wants = lib.optional cfg.tor.manageService "tor.service";
+      };
+    })
+
+    (lib.mkIf (cfg.tor.enable && cfg.tor.manageService) {
+      services.tor = {
+        enable = true;
+        client = {
+          enable = true;
+          socksListenAddress = {
+            addr = cfg.tor.socksAddress;
+            port = cfg.tor.socksPort;
+            IsolateDestAddr = true;
+            IsolateDestPort = true;
+            OnionTrafficOnly = true;
+          };
+        };
+      };
+    })
 
     (lib.mkIf cfg.tls.enable {
       services.zaptunnel-relay.listenAddress = lib.mkDefault "0.0.0.0";

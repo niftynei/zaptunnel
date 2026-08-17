@@ -137,7 +137,7 @@
       <aside class="instructions">
         <div class="step">
           <span>1</span>
-          <div><h3>Find your node</h3><p>Copy the <code>id</code> from <code>lightning-cli getinfo</code> and provide the public <code>host:port</code> where CLN listens.</p></div>
+          <div><h3>Find your node</h3><p>Copy the <code>id</code> from <code>lightning-cli getinfo</code> and provide the clearnet or v3 onion <code>host:port</code> where CLN listens.</p></div>
         </div>
         <div class="step">
           <span>2</span>
@@ -163,8 +163,8 @@
           <label for="node-id">Node ID <small>66-character compressed public key</small></label>
           <input id="node-id" bind:value={nodeId} placeholder="02abc…" pattern={nodeIdPattern} minlength="66" maxlength="66" required autocomplete="off" spellcheck="false" />
 
-          <label for="address">Lightning address <small>public host and peer port</small></label>
-          <input id="address" bind:value={address} placeholder="node.example.com:9735" required autocomplete="off" spellcheck="false" />
+          <label for="address">Lightning address <small>clearnet or v3 onion host and peer port</small></label>
+          <input id="address" bind:value={address} placeholder="node.example.com:9735 or ….onion:9735" required autocomplete="off" spellcheck="false" />
 
           <label for="rune">Getinfo rune <small>encrypted end to end</small></label>
           <div class="rune-field">
@@ -208,7 +208,7 @@
   <section class="principles" id="how-it-works">
     <article><b>01</b><h2>Lightning-native</h2><p>The browser makes an ordinary BOLT-8 peer connection. Zaptunnel only carries its encrypted bytes.</p></article>
     <article><b>02</b><h2>Relay stays blind</h2><p>Your rune and RPC payload are encrypted to the node key. The relay can route them, never read them.</p></article>
-    <article><b>03</b><h2>No node agent</h2><p>Point the SDK at the public Lightning address your node already accepts. Nothing extra runs beside CLN.</p></article>
+    <article><b>03</b><h2>No node agent</h2><p>Point the SDK at the clearnet or v3 onion Lightning address your node already accepts. Nothing extra runs beside CLN.</p></article>
   </section>
 
   <section class="sdk-section" id="sdk">

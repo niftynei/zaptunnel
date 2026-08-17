@@ -6,8 +6,8 @@ The default Zaptunnel path connects directly to a caller-provided CLN
 Lightning address:
 
 ```text
-browser -- WSS --> relay -- TCP --> CLN Lightning peer listener
-        <----------- BOLT-8 ----------->
+browser -- WSS --> relay -- TCP/Tor --> CLN Lightning peer listener
+        <------------- BOLT-8 ------------->
 ```
 
 The relay terminates the outer TLS and WebSocket transport, but it does not
@@ -36,7 +36,7 @@ selection by the SDK, and connection-limit accounting.
 Every version 1 connection request must provide:
 
 - the expected destination node public key; and
-- a publicly dialable `host:port` address.
+- a publicly dialable clearnet `host:port` or v3 onion-service address.
 
 The relay performs no gossip lookup or automatic address discovery. A request
 without an address fails with a stable, machine-readable `address_required`
@@ -51,8 +51,22 @@ always the expected BOLT-8 responder identity. Private, loopback, link-local,
 multicast, and reserved destinations must be rejected to prevent SSRF.
 Hostnames must be resolved by the relay, validated after resolution, and
 dialed using a pinned validated address so DNS rebinding cannot change the
-destination between validation and connection. Onion addresses are not
-supported unless a Tor dialer is explicitly added later.
+destination between validation and connection.
+
+Valid 56-character v3 `.onion` hostnames are preserved instead of being sent
+to the system DNS resolver. When Tor support is enabled, the relay hands the
+hostname to its loopback SOCKS5 proxy using the SOCKS domain-name address type.
+The endpoint-verification probe and admitted browser session share this dialer,
+so the address is authenticated and used over the same transport. Legacy v2
+and malformed onion names are rejected locally. If no Tor proxy is configured,
+onion admission fails closed with `onion_unavailable`.
+
+The NixOS module can run a dedicated Tor client whose SOCKS listener accepts
+onion traffic only and isolates circuits by destination address and port. Tor
+does not hide the browser from Zaptunnel: the relay still observes the browser
+IP, requested node ID, onion hostname, timing, and byte counts. It does prevent
+local DNS leakage of the onion hostname and allows the relay to reach a node
+that exposes only an onion service.
 
 Accepting arbitrary addresses creates an open-proxy risk even though the
 browser ultimately authenticates the destination through BOLT-8. Before

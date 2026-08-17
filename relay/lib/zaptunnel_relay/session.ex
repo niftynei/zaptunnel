@@ -5,18 +5,15 @@ defmodule ZaptunnelRelay.Session do
 
   require Logger
 
+  alias ZaptunnelRelay.Dialer
+
   @impl true
-  def init(%{address: {ip, port}, node_id: node_id}) do
+  def init(%{address: target, node_id: node_id}) do
     timeout = Application.fetch_env!(:zaptunnel_relay, :connect_timeout_ms)
 
-    case :gen_tcp.connect(
-           ip,
-           port,
-           [:binary, active: :once, packet: :raw, nodelay: true],
-           timeout
-         ) do
+    case Dialer.connect(target, timeout: timeout, active: :once) do
       {:ok, socket} ->
-        Logger.debug("session connected node_id=#{node_id} target=#{format_address(ip, port)}")
+        Logger.debug("session connected node_id=#{node_id} target=#{format_address(target)}")
         ZaptunnelRelay.Telemetry.emit([:session, :start], %{count: 1})
 
         {:ok,
@@ -85,7 +82,9 @@ defmodule ZaptunnelRelay.Session do
 
   def terminate(_reason, _state), do: :ok
 
-  defp format_address(ip, port) do
+  defp format_address({ip, port}) do
     "#{:inet.ntoa(ip)}:#{port}"
   end
+
+  defp format_address({:onion, host, port}), do: "#{host}:#{port}"
 end

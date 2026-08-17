@@ -18,11 +18,31 @@ unless config_env() == :test do
         raise "ZAPTUNNEL_TLS_CERTFILE and ZAPTUNNEL_TLS_KEYFILE must be set together"
     end
 
+  tor_socks_proxy =
+    case {System.get_env("ZAPTUNNEL_TOR_SOCKS_ADDRESS"),
+          System.get_env("ZAPTUNNEL_TOR_SOCKS_PORT")} do
+      {nil, nil} ->
+        nil
+
+      {address, port} when is_binary(address) and is_binary(port) ->
+        with {:ok, socks_ip} <- :inet.parse_address(String.to_charlist(address)),
+             {socks_port, ""} when socks_port in 1..65_535 <- Integer.parse(port) do
+          {socks_ip, socks_port}
+        else
+          {:error, _reason} -> raise "ZAPTUNNEL_TOR_SOCKS_ADDRESS must be an IP address"
+          _invalid_port -> raise "ZAPTUNNEL_TOR_SOCKS_PORT must be an integer from 1 to 65535"
+        end
+
+      _partial ->
+        raise "ZAPTUNNEL_TOR_SOCKS_ADDRESS and ZAPTUNNEL_TOR_SOCKS_PORT must be set together"
+    end
+
   config :zaptunnel_relay,
     ip: ip,
     port: String.to_integer(System.get_env("ZAPTUNNEL_WEB_PORT", "4000")),
     allow_private_addresses:
       System.get_env("ZAPTUNNEL_ALLOW_PRIVATE_ADDRESSES", "false") in ["1", "true"],
+    tor_socks_proxy: tor_socks_proxy,
     ticket_ttl_ms: String.to_integer(System.get_env("ZAPTUNNEL_TICKET_TTL_MS", "10000")),
     free_sessions_per_node:
       String.to_integer(System.get_env("ZAPTUNNEL_FREE_SESSIONS_PER_NODE", "3")),

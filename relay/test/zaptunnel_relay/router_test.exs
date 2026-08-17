@@ -23,6 +23,7 @@ defmodule ZaptunnelRelay.RouterTest do
     Application.put_env(:zaptunnel_relay, :router_test_probe_result, :ok)
     previous_website_host = Application.get_env(:zaptunnel_relay, :website_host)
     previous_relay_host = Application.get_env(:zaptunnel_relay, :relay_host)
+    previous_tor_proxy = Application.get_env(:zaptunnel_relay, :tor_socks_proxy)
     Admission.reset()
     EndpointVerifier.reset()
     RateLimiter.reset()
@@ -33,6 +34,7 @@ defmodule ZaptunnelRelay.RouterTest do
       Application.delete_env(:zaptunnel_relay, :router_test_probe_result)
       Application.put_env(:zaptunnel_relay, :website_host, previous_website_host)
       Application.put_env(:zaptunnel_relay, :relay_host, previous_relay_host)
+      Application.put_env(:zaptunnel_relay, :tor_socks_proxy, previous_tor_proxy)
     end)
 
     :ok
@@ -58,6 +60,27 @@ defmodule ZaptunnelRelay.RouterTest do
     assert get_resp_header(conn, "x-request-id") == [body["request_id"]]
     assert log =~ "admission rejected request_id=#{body["request_id"]}"
     assert log =~ "stage=verification reason=endpoint_unverified"
+  end
+
+  test "preserves a v3 onion hostname for verification and session dialing" do
+    onion = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+    Application.put_env(:zaptunnel_relay, :tor_socks_proxy, {{127, 0, 0, 1}, 9_050})
+
+    conn = post_connection("#{onion}:9735")
+
+    assert conn.status == 201
+    assert_receive {:probe, @node_id, {:onion, ^onion, 9_735}}
+  end
+
+  test "rejects onion targets when the relay has no Tor proxy" do
+    Application.put_env(:zaptunnel_relay, :tor_socks_proxy, nil)
+    onion = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+
+    conn = post_connection("#{onion}:9735")
+
+    assert conn.status == 503
+    assert %{"error" => "onion_unavailable"} = Jason.decode!(conn.resp_body)
+    refute_receive {:probe, _, _}
   end
 
   test "logs malformed admission input without reflecting it unsafely" do
@@ -106,9 +129,9 @@ defmodule ZaptunnelRelay.RouterTest do
     assert get_resp_header(response, "cache-control") == ["no-store"]
   end
 
-  defp post_connection do
+  defp post_connection(address \\ "127.0.0.1:9735") do
     :post
-    |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: "127.0.0.1:9735"}))
+    |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: address}))
     |> put_req_header("content-type", "application/json")
     |> Router.call([])
   end
