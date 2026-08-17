@@ -21,7 +21,7 @@ export TF_VAR_ssh_key_fingerprint := $(SSH_KEY_FINGERPRINT)
 .PHONY: help check-token check-ip init register-key plan create provision ip \
 	wait-for-nixos pull-host-config install-acme-token verify-acme-token deploy \
 	deploy-local-build deploy-dry build-host build check update ssh status \
-	logs acme-logs prometheus-logs website health metrics smoke prometheus dns destroy
+	logs acme-logs prometheus-logs grafana-logs website health metrics smoke prometheus grafana dns destroy
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -165,10 +165,10 @@ update: ## Update pinned flake inputs.
 ssh: check-ip ## Open a root shell on the droplet.
 	$(SSH) root@$(IP)
 
-status: check-ip ## Show relay, ACME, Prometheus, and exporter service status.
+status: check-ip ## Show relay, ACME, Prometheus, Grafana, and exporter service status.
 	$(SSH) root@$(IP) 'systemctl --no-pager --full status \
 		zaptunnel-relay.service acme-zapptunnel.com.service \
-		prometheus.service prometheus-node-exporter.service'
+		prometheus.service prometheus-node-exporter.service grafana.service'
 
 logs: check-ip ## Follow Zaptunnel relay logs.
 	$(SSH) root@$(IP) 'journalctl -u zaptunnel-relay.service -f'
@@ -178,6 +178,9 @@ acme-logs: check-ip ## Follow certificate issuance and renewal logs.
 
 prometheus-logs: check-ip ## Follow Prometheus logs.
 	$(SSH) root@$(IP) 'journalctl -u prometheus.service -f'
+
+grafana-logs: check-ip ## Follow Grafana logs.
+	$(SSH) root@$(IP) 'journalctl -u grafana.service -f'
 
 health: ## Check the public relay health endpoint.
 	curl --fail --silent --show-error https://relay.zapptunnel.com/healthz
@@ -209,6 +212,10 @@ smoke: ## Wait for DNS/ACME, then verify HTTPS health and Prometheus exposition.
 prometheus: check-ip ## Tunnel the private Prometheus UI to http://127.0.0.1:9090.
 	@echo "Prometheus: http://127.0.0.1:9090 (Ctrl-C to close)"
 	$(SSH) -N -L 9090:127.0.0.1:9090 root@$(IP)
+
+grafana: check-ip ## Tunnel the private Grafana dashboard to http://127.0.0.1:3000.
+	@echo "Grafana: http://127.0.0.1:3000 (Ctrl-C to close)"
+	$(SSH) -N -L 3000:127.0.0.1:3000 root@$(IP)
 
 dns: ## Show the current apex and relay DNS records.
 	dig +short A zapptunnel.com

@@ -113,7 +113,11 @@ nix build .#sdk
 Prometheus can scrape `GET /metrics` on the relay listener. Metrics cover
 admission outcomes, rate limiting, endpoint verification, pending and active
 sessions, duration, and forwarded byte counts. Node IDs are deliberately not
-used as metric labels.
+used as metric labels. Admission responses include an `X-Request-ID` for
+correlation with private structured logs; public errors remain intentionally
+generic. The DigitalOcean NixOS configuration also provisions a private
+Grafana instance and a ready-to-use Zaptunnel operations dashboard; open its
+SSH tunnel with `make grafana`.
 
 The development-only `ZAPTUNNEL_ALLOW_PRIVATE_ADDRESSES=true` setting must not
 be enabled on a public relay.

@@ -106,6 +106,83 @@
     ];
   };
 
+  # Grafana is deliberately private, just like Prometheus. Operators reach it
+  # through the SSH tunnel exposed by `make grafana`; no additional public
+  # firewall port or reverse proxy is required.
+  services.grafana = {
+    enable = true;
+
+    settings = {
+      server = {
+        http_addr = "127.0.0.1";
+        http_port = 3000;
+      };
+
+      analytics = {
+        reporting_enabled = false;
+        check_for_updates = false;
+        check_for_plugin_updates = false;
+        feedback_links_enabled = false;
+      };
+
+      "auth.anonymous" = {
+        enabled = true;
+        org_role = "Viewer";
+      };
+
+      auth.disable_login_form = true;
+      security = {
+        disable_initial_admin_creation = true;
+        secret_key = "$__file{/var/lib/grafana/secret_key}";
+      };
+      users.default_theme = "dark";
+      dashboards.default_home_dashboard_path = toString ../dashboards/zaptunnel.json;
+    };
+
+    provision = {
+      enable = true;
+
+      datasources.settings = {
+        apiVersion = 1;
+        prune = true;
+        datasources = [
+          {
+            name = "Prometheus";
+            uid = "prometheus";
+            type = "prometheus";
+            access = "proxy";
+            url = "http://127.0.0.1:9090";
+            isDefault = true;
+            editable = false;
+          }
+        ];
+      };
+
+      dashboards.settings = {
+        apiVersion = 1;
+        providers = [
+          {
+            name = "Zaptunnel";
+            folder = "Zaptunnel";
+            type = "file";
+            disableDeletion = true;
+            editable = false;
+            options.path = ../dashboards;
+          }
+        ];
+      };
+    };
+  };
+
+  # Grafana 12 requires an installation-specific encryption key. Generate it
+  # once as the unprivileged service user and keep it outside the Nix store.
+  systemd.services.grafana.preStart = ''
+    umask 077
+    if [ ! -s /var/lib/grafana/secret_key ]; then
+      ${pkgs.openssl}/bin/openssl rand -hex 32 > /var/lib/grafana/secret_key
+    fi
+  '';
+
   environment.systemPackages = with pkgs; [
     htop
     tmux

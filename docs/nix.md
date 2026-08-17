@@ -154,7 +154,20 @@ Create `A` and, if applicable, `AAAA` records for both `zapptunnel.com` and
 human-facing website; the SDK and API use `https://relay.zapptunnel.com`.
 
 Prometheus retains 30 days of data and scrapes Zaptunnel, node-exporter, and
-itself. Its UI is loopback-only. Open the SSH tunnel with:
+itself. Grafana is provisioned with Prometheus as its default data source and a
+read-only **Zaptunnel Overview** dashboard covering admissions, endpoint
+verification failures, sessions, traffic, and host health. Both UIs listen on
+loopback only.
+
+Open the Grafana SSH tunnel with:
+
+```console
+make grafana
+```
+
+Then visit `http://127.0.0.1:3000`. Access is anonymous and read-only because
+the service is reachable only through an authenticated SSH connection. For the
+raw Prometheus query UI, use:
 
 ```console
 make prometheus
