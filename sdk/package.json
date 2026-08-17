@@ -1,6 +1,6 @@
 {
   "name": "@zaptunnel/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "End-to-end encrypted browser connections to Core Lightning through Zaptunnel",
   "license": "MIT",
   "homepage": "https://zapptunnel.com/#sdk",
@@ -26,7 +26,8 @@
     }
   },
   "files": [
-    "dist/lib"
+    "dist/lib",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",

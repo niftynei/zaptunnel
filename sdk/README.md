@@ -42,6 +42,26 @@ type ListFunds = { channels: Array<{ peer_id: string; connected: boolean }> };
 const funds = await node.call<ListFunds>("listfunds");
 ```
 
+## Compatibility
+
+The SDK targets current evergreen browsers with WebSocket, Web Crypto,
+`AbortController`, and async-generator support. It talks to CLN's Lightning
+peer port using BOLT 8 and invokes RPC through the Commando plugin; it does not
+use CLN REST. The requested RPC must exist on the node and the supplied rune
+must authorize it.
+
+| SDK | Relay | Address support | Notable APIs |
+|---|---|---|---|
+| `0.3.x` | Current relay recommended | Clearnet and v3 onion | Request IDs, connection status, gossip suppression, paid-invoice iterator |
+| `0.2.x` | Initial public relay | Clearnet | Generic RPC calls, capability/version gates, paid-invoice iterator |
+| `0.1.x` | Initial public relay | Clearnet | Generic RPC calls |
+
+Newer SDKs remain usable with an older relay for features that relay supports;
+for example, a missing request ID is represented as `undefined`. Onion
+addresses require a relay configured with Tor. Because CLN plugins and RPC
+methods vary independently of the core version, use `getCapabilities()` before
+depending on optional methods.
+
 ### Gossip suppression
 
 After every BOLT-8 initialization (including automatic reconnects), the SDK
