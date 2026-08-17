@@ -105,7 +105,9 @@ node.disconnect();
 ```
 
 See [the SDK README](sdk/README.md) for identity persistence, generic RPC
-calls, error handling, and local package installation.
+calls, error handling, and local package installation. Before a public release,
+work through the automated and manual scenarios in the
+[public beta checklist](docs/beta-checklist.md).
 
 Build the packaged OTP release:
 
