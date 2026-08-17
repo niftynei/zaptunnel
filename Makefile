@@ -21,7 +21,7 @@ export TF_VAR_ssh_key_fingerprint := $(SSH_KEY_FINGERPRINT)
 .PHONY: help check-token check-ip init register-key plan create provision ip \
 	wait-for-nixos pull-host-config install-acme-token verify-acme-token deploy \
 	deploy-local-build deploy-dry build-host build check update ssh status \
-	logs acme-logs prometheus-logs grafana-logs tor-logs website health metrics smoke prometheus grafana dns destroy
+	logs acme-logs prometheus-logs grafana-logs alert-logs tor-logs website health metrics smoke prometheus grafana alerts dns destroy
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -168,7 +168,8 @@ ssh: check-ip ## Open a root shell on the droplet.
 status: check-ip ## Show relay, ACME, Prometheus, Grafana, and exporter service status.
 	$(SSH) root@$(IP) 'systemctl --no-pager --full status \
 		zaptunnel-relay.service acme-zapptunnel.com.service \
-		prometheus.service prometheus-node-exporter.service grafana.service tor.service'
+		prometheus.service prometheus-node-exporter.service grafana.service \
+		alertmanager.service alertmanager-webhook-logger.service tor.service'
 
 logs: check-ip ## Follow Zaptunnel relay logs.
 	$(SSH) root@$(IP) 'journalctl -u zaptunnel-relay.service -f'
@@ -181,6 +182,9 @@ prometheus-logs: check-ip ## Follow Prometheus logs.
 
 grafana-logs: check-ip ## Follow Grafana logs.
 	$(SSH) root@$(IP) 'journalctl -u grafana.service -f'
+
+alert-logs: check-ip ## Follow firing and resolved Alertmanager notifications.
+	$(SSH) root@$(IP) 'journalctl -u alertmanager-webhook-logger.service -f'
 
 tor-logs: check-ip ## Follow Tor client logs.
 	$(SSH) root@$(IP) 'journalctl -u tor.service -f'
@@ -219,6 +223,10 @@ prometheus: check-ip ## Tunnel the private Prometheus UI to http://127.0.0.1:909
 grafana: check-ip ## Tunnel the private Grafana dashboard to http://127.0.0.1:3000.
 	@echo "Grafana: http://127.0.0.1:3000 (Ctrl-C to close)"
 	$(SSH) -N -L 3000:127.0.0.1:3000 root@$(IP)
+
+alerts: check-ip ## Tunnel the private Alertmanager UI to http://127.0.0.1:9093.
+	@echo "Alertmanager: http://127.0.0.1:9093 (Ctrl-C to close)"
+	$(SSH) -N -L 9093:127.0.0.1:9093 root@$(IP)
 
 dns: ## Show the current apex and relay DNS records.
 	dig +short A zapptunnel.com

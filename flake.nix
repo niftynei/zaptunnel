@@ -148,6 +148,7 @@
           git
           just
           gnumake
+          prometheus.cli
           opentofu
           doctl
           nixos-rebuild
@@ -188,6 +189,14 @@
       };
 
       sdk-unit = sdk;
+
+      alert-rules =
+        pkgs.runCommand "zaptunnel-alert-rules" {
+          nativeBuildInputs = [pkgs.prometheus.cli];
+        } ''
+          promtool check rules ${./nix/alerts/zaptunnel.yml}
+          touch "$out"
+        '';
     });
 
     packages = forAllSystems (system: let

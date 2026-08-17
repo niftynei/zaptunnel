@@ -190,7 +190,12 @@ defmodule ZaptunnelRelay.Metrics do
       help("zaptunnel_sessions", "Pending and active admission slots", "gauge"),
       sample("zaptunnel_sessions{state=\"pending\"}", admission.pending),
       sample("zaptunnel_sessions{state=\"active\"}", admission.active),
-      sample("zaptunnel_sessions{state=\"total\"}", admission.total)
+      sample("zaptunnel_sessions{state=\"total\"}", admission.total),
+      help("zaptunnel_session_capacity", "Configured global session capacity", "gauge"),
+      sample(
+        "zaptunnel_session_capacity",
+        Application.fetch_env!(:zaptunnel_relay, :max_total_sessions)
+      )
     ]
     |> IO.iodata_to_binary()
   end

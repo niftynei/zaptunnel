@@ -74,6 +74,14 @@
     listenAddress = "127.0.0.1";
     port = 9090;
     retentionTime = "30d";
+    ruleFiles = [../alerts/zaptunnel.yml];
+    alertmanagers = [
+      {
+        static_configs = [
+          {targets = ["127.0.0.1:9093"];}
+        ];
+      }
+    ];
 
     exporters.node = {
       enable = true;
@@ -106,6 +114,35 @@
       }
     ];
   };
+
+  services.prometheus.alertmanager = {
+    enable = true;
+    listenAddress = "127.0.0.1";
+    port = 9093;
+    configuration = {
+      global.resolve_timeout = "5m";
+      route = {
+        receiver = "journal";
+        group_by = ["alertname" "severity"];
+        group_wait = "30s";
+        group_interval = "5m";
+        repeat_interval = "4h";
+      };
+      receivers = [
+        {
+          name = "journal";
+          webhook_configs = [
+            {
+              url = "http://127.0.0.1:6725";
+              send_resolved = true;
+            }
+          ];
+        }
+      ];
+    };
+  };
+
+  services.prometheus.alertmanagerWebhookLogger.enable = true;
 
   # Grafana is deliberately private, just like Prometheus. Operators reach it
   # through the SSH tunnel exposed by `make grafana`; no additional public

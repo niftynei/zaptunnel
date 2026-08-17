@@ -168,6 +168,15 @@ read-only **Zaptunnel Overview** dashboard covering admissions, endpoint
 verification failures, sessions, traffic, and host health. Both UIs listen on
 loopback only.
 
+Prometheus also evaluates Zaptunnel availability, Tor availability,
+verification failures, rate limiting, session capacity, failed systemd units,
+CPU, memory, and disk alert rules. Alertmanager groups them and writes firing
+and resolved notifications to the system journal. Use `make alert-logs` for
+the notification stream or `make alerts` for its private UI. No third-party
+notification receiver is configured by default, so adding email, ntfy, or
+another destination remains an operator choice rather than a secret embedded
+in the Nix store.
+
 Open the Grafana SSH tunnel with:
 
 ```console

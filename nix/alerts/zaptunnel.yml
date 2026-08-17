@@ -1,0 +1,89 @@
+groups:
+  - name: zaptunnel
+    rules:
+      - alert: ZaptunnelRelayDown
+        expr: up{job="zapptunnel"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Zaptunnel relay metrics are unreachable
+          description: Prometheus has been unable to scrape the relay for two minutes.
+
+      - alert: ZaptunnelTorDown
+        expr: node_systemd_unit_state{job="node",name="tor.service",state="active"} != 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Tor client is not active
+          description: Onion-only CLN nodes cannot be reached while tor.service is inactive.
+
+      - alert: ZaptunnelVerificationFailureSpike
+        expr: |
+          sum(increase(zaptunnel_endpoint_verifications_total{job="zapptunnel",result="failure"}[5m])) > 10
+          and
+          sum(rate(zaptunnel_endpoint_verifications_total{job="zapptunnel",result="failure"}[5m]))
+            / clamp_min(sum(rate(zaptunnel_endpoint_verifications_total{job="zapptunnel"}[5m])), 0.001) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Endpoint verification failures are elevated
+          description: More than half of recent endpoint checks are failing with meaningful traffic volume.
+
+      - alert: ZaptunnelSessionCapacityHigh
+        expr: zaptunnel_sessions{job="zapptunnel",state="total"} / zaptunnel_session_capacity{job="zapptunnel"} > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Relay session capacity is above 80 percent
+          description: Pending and active sessions are approaching the configured global limit.
+
+      - alert: ZaptunnelRateLimitingSpike
+        expr: increase(zaptunnel_rate_limited_total{job="zapptunnel"}[5m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Admission rate limiting is elevated
+          description: The relay rejected more than 50 admission requests in five minutes.
+
+      - alert: ZaptunnelSystemdUnitFailed
+        expr: node_systemd_unit_state{job="node",state="failed"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A systemd unit is failed
+          description: "{{ $labels.name }} has remained failed for five minutes."
+
+      - alert: ZaptunnelHostCpuHigh
+        expr: 100 - (avg(rate(node_cpu_seconds_total{job="node",mode="idle"}[5m])) * 100) > 90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host CPU usage is above 90 percent
+          description: Sustained CPU pressure may delay verification and tunnel traffic.
+
+      - alert: ZaptunnelHostMemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}) * 100 > 90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host memory usage is above 90 percent
+          description: Sustained memory pressure may cause service instability.
+
+      - alert: ZaptunnelRootDiskHigh
+        expr: |
+          (1 - node_filesystem_avail_bytes{job="node",mountpoint="/",fstype!~"tmpfs|overlay"}
+            / node_filesystem_size_bytes{job="node",mountpoint="/",fstype!~"tmpfs|overlay"}) * 100 > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Root filesystem usage is above 85 percent
+          description: Disk exhaustion can interrupt Prometheus retention and deployments.
