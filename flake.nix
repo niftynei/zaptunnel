@@ -46,7 +46,7 @@
     mkSdk = pkgs: {runTests ? false}:
       pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
         pname = "zaptunnel-sdk";
-        version = "0.1.0";
+        version = "0.2.0";
         src = pkgs.lib.cleanSourceWith {
           src = ./sdk;
           filter = path: _type: let
@@ -81,7 +81,7 @@
           runHook preInstall
           mkdir -p "$out/lib" "$out/bin" "$out/share/zaptunnel-site"
           cp -R dist/lib/. "$out/lib/"
-          cp -R dist/index.html dist/assets "$out/share/zaptunnel-site/"
+          cp -R dist/index.html dist/assets dist/favicon.svg "$out/share/zaptunnel-site/"
           cp scripts/e2e.mjs "$out/bin/zaptunnel-sdk-e2e.mjs"
           substituteInPlace "$out/bin/zaptunnel-sdk-e2e.mjs" \
             --replace-fail '../dist/lib/index.js' '../lib/index.js'

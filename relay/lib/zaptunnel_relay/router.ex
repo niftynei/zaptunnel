@@ -30,7 +30,7 @@ defmodule ZaptunnelRelay.Router do
   get "/" do
     case conn.assigns[:zaptunnel_surface] do
       surface when surface in [:website, :development] -> serve_website(conn)
-      _other -> json(conn, 404, %{error: "not_found"})
+      :relay -> redirect_to_website(conn)
     end
   end
 
@@ -130,6 +130,13 @@ defmodule ZaptunnelRelay.Router do
        do: callback.(conn)
 
   defp relay_only(conn, _callback), do: json(conn, 404, %{error: "not_found"})
+
+  defp redirect_to_website(conn) do
+    conn
+    |> put_resp_header("location", "https://zapptunnel.com/#sdk")
+    |> put_resp_header("cache-control", "no-store")
+    |> send_resp(302, "")
+  end
 
   defp serve_website(conn) do
     path = Application.app_dir(:zaptunnel_relay, "priv/static/index.html")

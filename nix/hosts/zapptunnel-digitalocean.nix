@@ -10,6 +10,15 @@
   };
   boot.tmp.cleanOnBoot = true;
 
+  # DigitalOcean images keep the GRUB configuration and kernels on an ext4
+  # Linux extended boot partition. nixos-generate-config omits it because the
+  # GPT auto-generator mounts it, so declare it explicitly for deterministic
+  # activation and boot behavior.
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-label/BOOT";
+    fsType = "ext4";
+  };
+
   networking = {
     hostName = "zapptunnel";
     firewall.allowedTCPPorts = [22 443];
@@ -26,9 +35,11 @@
     };
   };
 
-  # Terraform installs the initial root key. Add permanent deployment keys
-  # here before relying on this configuration as the only source of access.
-  users.users.root.openssh.authorizedKeys.keys = [];
+  # Keep the provisioning key declarative so the first NixOS activation
+  # cannot remove the only working route back into the host.
+  users.users.root.openssh.authorizedKeys.keyFiles = [
+    ./zapptunnel-deploy.pub
+  ];
 
   services.zaptunnel-relay = {
     enable = true;

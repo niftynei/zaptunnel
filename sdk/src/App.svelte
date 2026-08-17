@@ -17,6 +17,7 @@
   };
 
   const runeCommand = `lightning-cli createrune -k "restrictions"='[["method=getinfo"]]'`;
+  const nodeIdPattern = "(02|03)[0-9a-fA-F]{64}";
   const relayOrigin = import.meta.env.VITE_ZAPTUNNEL_RELAY ?? DEFAULT_RELAY;
 
   let nodeId = "";
@@ -70,8 +71,8 @@
     <span>ZAPTUNNEL</span>
   </a>
   <nav aria-label="Primary navigation">
-    <a href="#how-it-works">How it works</a>
     <a href="#demo">Live demo</a>
+    <a href="#how-it-works">How it works</a>
     <a href="#sdk">SDK</a>
   </nav>
   <span class="alpha"><i></i> Public alpha</span>
@@ -79,18 +80,26 @@
 
 <main id="top">
   <section class="hero">
-    <div class="aurora aurora-violet" aria-hidden="true"></div>
+    <div class="aurora aurora-cyan" aria-hidden="true"></div>
     <div class="aurora aurora-yellow" aria-hidden="true"></div>
     <div class="energy-field" aria-hidden="true">
       <span>ϟ</span><span>ϟ</span><span>ϟ</span><span>ϟ</span><span>ϟ</span>
       <span>ϟ</span><span>ϟ</span><span>ϟ</span><span>ϟ</span><span>ϟ</span>
     </div>
-    <div class="eyebrow">Browser-native Core Lightning access</div>
+    <div class="eyebrow">Browser access for Core Lightning</div>
     <h1>Your node.<br /><em>From anywhere.</em></h1>
     <p class="lede">
-      Give a web app a direct Lightning connection to your CLN node—without opening a new port,
-      managing a certificate, or letting the relay read your RPC traffic.
+      Give a web app a direct Lightning connection to your Core Lightning node—without opening a
+      new port, managing a certificate, or letting the relay read your RPC traffic.
     </p>
+    <div class="compatibility" aria-label="Core Lightning compatibility">
+      <span>Built for</span>
+      <a href="https://docs.corelightning.org/docs/home">Core Lightning</a>
+      <i>·</i>
+      <a href="https://github.com/lightning/bolts/blob/master/08-transport.md">BOLT 8</a>
+      <i>·</i>
+      <a href="https://docs.corelightning.org/reference/commando">Commando</a>
+    </div>
     <div class="hero-actions">
       <a class="button primary" href="#demo">Try getinfo <span>↓</span></a>
       <a class="button secondary" href="#sdk">Read the SDK guide</a>
@@ -106,15 +115,17 @@
   </section>
 
   <div class="voltage-strip" aria-hidden="true">
-    <span>END-TO-END ENCRYPTED</span><b>ϟ</b><span>LIGHTNING NATIVE</span><b>ϟ</b>
-    <span>NO NODE AGENT</span><b>ϟ</b><span>BLIND RELAY</span><b>ϟ</b>
+    <div class="voltage-track">
+      <div class="voltage-group">
+        <span>END-TO-END ENCRYPTED</span><b>ϟ</b><span>LIGHTNING NATIVE</span><b>ϟ</b>
+        <span>NO NODE AGENT</span><b>ϟ</b><span>BLIND RELAY</span><b>ϟ</b>
+      </div>
+      <div class="voltage-group">
+        <span>END-TO-END ENCRYPTED</span><b>ϟ</b><span>LIGHTNING NATIVE</span><b>ϟ</b>
+        <span>NO NODE AGENT</span><b>ϟ</b><span>BLIND RELAY</span><b>ϟ</b>
+      </div>
+    </div>
   </div>
-
-  <section class="principles" id="how-it-works">
-    <article><b>01</b><h2>Lightning-native</h2><p>The browser makes an ordinary BOLT-8 peer connection. Zaptunnel only carries its encrypted bytes.</p></article>
-    <article><b>02</b><h2>Relay stays blind</h2><p>Your rune and RPC payload are encrypted to the node key. The relay can route them, never read them.</p></article>
-    <article><b>03</b><h2>No node agent</h2><p>Point the SDK at the public Lightning address your node already accepts. Nothing extra runs beside CLN.</p></article>
-  </section>
 
   <section class="demo-section" id="demo">
     <div class="section-heading">
@@ -147,10 +158,10 @@
       </aside>
 
       <div class="console-card">
-        <div class="console-title"><span><i></i><i></i><i></i></span><b>GETINFO CONSOLE</b><small>relay.zapptunnel.com</small></div>
+        <div class="console-title"><span><i></i><i></i><i></i></span><b>GETINFO CONSOLE</b><small class="console-host">relay.zapptunnel.com</small></div>
         <form onsubmit={(event) => { event.preventDefault(); runGetInfo(); }}>
           <label for="node-id">Node ID <small>66-character compressed public key</small></label>
-          <input id="node-id" bind:value={nodeId} placeholder="02abc…" pattern="(02|03)[0-9a-fA-F]{64}" required autocomplete="off" spellcheck="false" />
+          <input id="node-id" bind:value={nodeId} placeholder="02abc…" pattern={nodeIdPattern} minlength="66" maxlength="66" required autocomplete="off" spellcheck="false" />
 
           <label for="address">Lightning address <small>public host and peer port</small></label>
           <input id="address" bind:value={address} placeholder="node.example.com:9735" required autocomplete="off" spellcheck="false" />
@@ -194,6 +205,12 @@
     </div>
   </section>
 
+  <section class="principles" id="how-it-works">
+    <article><b>01</b><h2>Lightning-native</h2><p>The browser makes an ordinary BOLT-8 peer connection. Zaptunnel only carries its encrypted bytes.</p></article>
+    <article><b>02</b><h2>Relay stays blind</h2><p>Your rune and RPC payload are encrypted to the node key. The relay can route them, never read them.</p></article>
+    <article><b>03</b><h2>No node agent</h2><p>Point the SDK at the public Lightning address your node already accepts. Nothing extra runs beside CLN.</p></article>
+  </section>
+
   <section class="sdk-section" id="sdk">
     <div class="section-heading">
       <div><span class="section-number">02 / BUILD WITH IT</span><h2>Three fields. One connection.</h2></div>
@@ -201,17 +218,49 @@
     </div>
     <div class="code-window">
       <div class="code-tabs"><span>TypeScript</span><small>@zaptunnel/sdk</small></div>
-      <pre><code><span class="purple">import</span> {'{ connect }'} <span class="purple">from</span> <span class="green">"@zaptunnel/sdk"</span>;
+      <pre><code><span class="keyword">import</span> {'{ connect }'} <span class="keyword">from</span> <span class="green">"@zaptunnel/sdk"</span>;
 
-<span class="purple">const</span> node = <span class="purple">await</span> connect({'{'}
+<span class="keyword">const</span> node = <span class="keyword">await</span> connect({'{'}
   nodeId: <span class="green">"02abc…"</span>,
   address: <span class="green">"node.example.com:9735"</span>,
   rune: getinfoRune
 {'}'});
 
-<span class="purple">const</span> info = <span class="purple">await</span> node.getinfo();</code></pre>
+<span class="keyword">const</span> info = <span class="keyword">await</span> node.getinfo();</code></pre>
+    </div>
+    <div class="sdk-resources" aria-label="SDK documentation links">
+      <div>
+        <span>PAYMENT EVENTS</span>
+        <h3>Listen for paid invoices</h3>
+        <p><code>paidInvoices()</code> is an async iterator backed by CLN’s resumable <code>waitanyinvoice</code> RPC.</p>
+        <pre><code><span class="keyword">for await</span> (<span class="keyword">const</span> invoice <span class="keyword">of</span> node.paidInvoices()) {'{'}
+  console.log(invoice.pay_index);
+{'}'}</code></pre>
+      </div>
+      <div>
+        <span>REFERENCE</span>
+        <h3>Go beyond getinfo</h3>
+        <p><code>node.call(method, params)</code> reaches any Commando-accessible RPC exposed by your node.</p>
+        <nav aria-label="Developer references">
+          <a href="https://www.npmjs.com/package/@zaptunnel/sdk">npm package <b>↗</b></a>
+          <a href="https://github.com/niftynei/zaptunnel/tree/main/sdk">Full SDK guide <b>↗</b></a>
+          <a href="https://docs.corelightning.org/reference/">CLN RPC reference <b>↗</b></a>
+          <a href="https://docs.corelightning.org/reference/createrune">Rune reference <b>↗</b></a>
+        </nav>
+      </div>
     </div>
   </section>
 </main>
 
-<footer><a class="brand" href="#top"><span class="brand-mark">ϟ</span><span>ZAPTUNNEL</span></a><p>End-to-end encrypted Lightning access for the open web.</p><small>Built for Core Lightning.</small></footer>
+<footer>
+  <a class="brand" href="#top"><span class="brand-mark">ϟ</span><span>ZAPTUNNEL</span></a>
+  <div class="footer-copy">
+    <p>End-to-end encrypted Lightning access for the open web.</p>
+    <small>
+      <a href="https://docs.corelightning.org/docs/home">Core Lightning</a> is
+      <a href="https://blockstream.com/lightning/">Blockstream’s</a> open-source Lightning
+      implementation. Zaptunnel is an independent project and is not affiliated with or endorsed
+      by Blockstream.
+    </small>
+  </div>
+</footer>

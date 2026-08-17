@@ -9,9 +9,11 @@ DIGITALOCEAN_TOKEN ?= $(shell doctl auth token 2>/dev/null)
 export DIGITALOCEAN_TOKEN
 
 TERRAFORM := $(shell if command -v terraform >/dev/null 2>&1; then printf 'terraform'; elif command -v tofu >/dev/null 2>&1; then printf 'tofu'; else printf 'nix develop --command tofu'; fi)
-NIXOS_REBUILD := $(shell if command -v nixos-rebuild >/dev/null 2>&1; then printf 'nixos-rebuild'; else printf 'nix develop --command nixos-rebuild'; fi)
+NIXOS_REBUILD := $(shell if command -v nixos-rebuild >/dev/null 2>&1; then printf 'env TMPDIR=/tmp nixos-rebuild'; else printf 'nix develop --command env TMPDIR=/tmp nixos-rebuild'; fi)
 IP = $(shell cd terraform 2>/dev/null && $(TERRAFORM) output -raw ipv4 2>/dev/null)
 SSH := ssh -o StrictHostKeyChecking=accept-new
+SCP := scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+HOST_COPY_ATTEMPTS ?= 12
 SSH_PUBLIC_KEY ?= $(HOME)/.ssh/id_ed25519.pub
 SSH_KEY_FINGERPRINT = $(shell if [ -f "$(SSH_PUBLIC_KEY)" ]; then ssh-keygen -E md5 -lf "$(SSH_PUBLIC_KEY)" | awk '{sub(/^MD5:/, "", $$2); print $$2}'; fi)
 export TF_VAR_ssh_key_fingerprint := $(SSH_KEY_FINGERPRINT)
@@ -92,12 +94,23 @@ wait-for-nixos: check-ip ## Wait until nixos-infect finishes and the droplet reb
 	exit 1
 
 pull-host-config: check-ip ## Pull the droplet's generated hardware and network configuration.
-	scp -o StrictHostKeyChecking=accept-new \
-		root@$(IP):/etc/nixos/hardware-configuration.nix \
-		nix/hosts/hardware-configuration.nix
-	@if scp -o StrictHostKeyChecking=accept-new \
-		root@$(IP):/etc/nixos/networking.nix \
-		nix/hosts/networking.nix; then \
+	@copy_from_host() { \
+		remote_path="$$1"; \
+		destination="$$2"; \
+		temporary="$$destination.tmp"; \
+		for attempt in $$(seq 1 $(HOST_COPY_ATTEMPTS)); do \
+			if $(SCP) "root@$(IP):$$remote_path" "$$temporary"; then \
+				mv "$$temporary" "$$destination"; \
+				return 0; \
+			fi; \
+			echo "  copy attempt $$attempt/$(HOST_COPY_ATTEMPTS) failed; retrying in 5 seconds"; \
+			sleep 5; \
+		done; \
+		rm -f "$$temporary"; \
+		return 1; \
+	}; \
+	copy_from_host /etc/nixos/hardware-configuration.nix nix/hosts/hardware-configuration.nix; \
+	if copy_from_host /etc/nixos/networking.nix nix/hosts/networking.nix; then \
 		echo "Pulled DigitalOcean networking configuration."; \
 	else \
 		echo "No generated networking.nix found; retaining DHCP configuration."; \

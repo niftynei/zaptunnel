@@ -66,6 +66,17 @@ defmodule ZaptunnelRelay.RouterTest do
     assert unknown.status == 421
   end
 
+  test "redirects the relay root to the SDK documentation" do
+    Application.put_env(:zaptunnel_relay, :website_host, "zapptunnel.com")
+    Application.put_env(:zaptunnel_relay, :relay_host, "relay.zapptunnel.com")
+
+    response = Router.call(%{conn(:get, "/") | host: "relay.zapptunnel.com"}, [])
+
+    assert response.status == 302
+    assert get_resp_header(response, "location") == ["https://zapptunnel.com/#sdk"]
+    assert get_resp_header(response, "cache-control") == ["no-store"]
+  end
+
   defp post_connection do
     :post
     |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: "127.0.0.1:9735"}))

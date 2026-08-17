@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Zaptunnel lightning bolt">
+  <defs>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#171714" />
+  <path
+    d="M37 5 13 36h17l-5 23 27-34H35z"
+    fill="#f5ff38"
+    opacity=".72"
+    filter="url(#glow)"
+  />
+  <path
+    d="M37 5 13 36h17l-5 23 27-34H35z"
+    fill="#f8ff58"
+    stroke="#ffffb0"
+    stroke-linejoin="round"
+    stroke-width="1.5"
+  />
+</svg>

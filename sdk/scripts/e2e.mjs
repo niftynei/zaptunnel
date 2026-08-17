@@ -1,4 +1,4 @@
-import { connect } from "../dist/lib/index.js";
+import { connect, ZaptunnelRpcError } from "../dist/lib/index.js";
 
 const [relay, nodeId, address, rune] = process.argv.slice(2);
 
@@ -16,7 +16,23 @@ try {
     throw new Error(`unexpected getinfo response: ${JSON.stringify(info)}`);
   }
 
-  console.log(JSON.stringify({ nodeId: info.id, browserPeerId: node.publicKey }));
+  const capabilities = await node.getCapabilities();
+  capabilities.require("getinfo");
+  capabilities.require("waitanyinvoice");
+
+  try {
+    await node.waitAnyInvoice({ lastPayIndex: Number.MAX_SAFE_INTEGER, waitTimeoutSeconds: 0 });
+    throw new Error("waitanyinvoice unexpectedly found an invoice beyond the maximum safe cursor");
+  } catch (error) {
+    if (!(error instanceof ZaptunnelRpcError) || error.code !== "rpc_timeout") throw error;
+  }
+
+  console.log(JSON.stringify({
+    nodeId: info.id,
+    browserPeerId: node.publicKey,
+    clnVersion: capabilities.versionRaw,
+    waitAnyInvoice: true
+  }));
 } finally {
   node.disconnect();
 }
