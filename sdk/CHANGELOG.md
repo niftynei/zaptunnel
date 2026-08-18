@@ -9,6 +9,8 @@
   detailed manager state snapshots with attempt and retry timing.
 - Add application-paid connection leases with MPP Lightning and L402 challenge
   negotiation and automatic reconnect reuse.
+- Add external-wallet settlement polling, protected claim recovery, and payment
+  lifecycle notifications for QR and mobile-wallet flows.
 
 ## 0.3.0
 

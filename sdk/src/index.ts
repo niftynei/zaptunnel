@@ -162,11 +162,38 @@ export type ZaptunnelPaymentChallenge = {
   quoteId: string;
 };
 
+export type ZaptunnelPaymentClaim = {
+  relay: string;
+  nodeId: string;
+  quoteId: string;
+  claimPath: string;
+  claimToken: string;
+  expiresAt: number;
+  /** Original invoice data, retained so recovery can render the same payment request. */
+  challenge: ZaptunnelPaymentChallenge;
+};
+
+export type ZaptunnelPaymentStore = {
+  /** Recover a pending or previously paid claim after a reload. */
+  loadClaim(nodeId: string): ZaptunnelPaymentClaim | undefined | Promise<ZaptunnelPaymentClaim | undefined>;
+  /** Persist the bearer claim secret. Applications should use protected storage. */
+  saveClaim(nodeId: string, claim: ZaptunnelPaymentClaim): void | Promise<void>;
+  clearClaim(nodeId: string): void | Promise<void>;
+};
+
+export type ZaptunnelPaymentStatus = "paying" | "waiting_settlement" | "settled";
+
 export type ZaptunnelPaymentOptions = {
   /** Preferred HTTP payment envelope. Auto prefers MPP and falls back to L402. */
   protocol?: ZaptunnelPaymentProtocol;
-  /** Pay the BOLT11 invoice and return its 32-byte payment preimage as lowercase hex. */
-  payInvoice(challenge: ZaptunnelPaymentChallenge): Promise<string>;
+  /**
+   * Pay or display the BOLT11 invoice. Return its preimage for immediate MPP/L402
+   * redemption, or return void when an external wallet will pay it.
+   */
+  payInvoice(challenge: ZaptunnelPaymentChallenge): Promise<string | void>;
+  /** Optional durable recovery for external-wallet claims and page reloads. */
+  store?: ZaptunnelPaymentStore;
+  onStatus?(status: ZaptunnelPaymentStatus, challenge: ZaptunnelPaymentChallenge): void;
 };
 
 export type ConnectOptions = {
@@ -351,6 +378,13 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Pay the Lightning invoice to obtain a reconnect-safe connection lease."]
   },
+  payment_quote_limit: {
+    stage: "relay_admission",
+    title: "Too many pending payment quotes",
+    summary: "This client already has the maximum number of unpaid connection invoices.",
+    retryable: true,
+    suggestions: ["Finish or allow an existing invoice to expire before requesting another."]
+  },
   payment_failed: {
     stage: "relay_admission",
     title: "Connection payment failed",
@@ -364,6 +398,27 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     summary: "The supplied preimage does not prove payment of this connection invoice.",
     retryable: false,
     suggestions: ["Use the preimage returned by the wallet that paid this exact invoice."]
+  },
+  payment_expired: {
+    stage: "relay_admission",
+    title: "Payment claim expired",
+    summary: "The invoice was not observed as paid before its settlement grace period ended.",
+    retryable: true,
+    suggestions: ["Request a fresh invoice. Contact the relay operator if the expired invoice was paid."]
+  },
+  invalid_claim: {
+    stage: "authorization",
+    title: "Payment claim rejected",
+    summary: "The saved external-wallet claim secret is invalid for this quote.",
+    retryable: false,
+    suggestions: ["Clear the saved claim and request a fresh payment challenge."]
+  },
+  payment_status_unavailable: {
+    stage: "relay_admission",
+    title: "Payment status unavailable",
+    summary: "The relay could not currently determine whether the invoice was paid.",
+    retryable: true,
+    suggestions: ["Keep the claim secret and retry after the relay billing connection recovers."]
   },
   invalid_lease: {
     stage: "relay_admission",
@@ -1402,6 +1457,8 @@ async function requestAdmission(
 ): Promise<AdmissionResponse> {
   type PaymentBody = Partial<AdmissionResponse> & {
     amount_sats?: number;
+    claim_path?: string;
+    claim_token?: string;
     error?: string;
     expires_at?: number;
     invoice?: string;
@@ -1410,12 +1467,16 @@ async function requestAdmission(
     payment_hash?: string;
     payment_protocols?: string[];
     quote_id?: string;
+    retry_after_ms?: number;
   };
 
-  const send = async (authorization?: string): Promise<{ response: Response; body: PaymentBody }> => {
+  const send = async (
+    authorization?: string,
+    lease: string | undefined = options.paymentLease
+  ): Promise<{ response: Response; body: PaymentBody }> => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (authorization) headers.authorization = authorization;
-    if (options.paymentLease) headers["x-zaptunnel-lease"] = options.paymentLease;
+    if (lease) headers["x-zaptunnel-lease"] = lease;
 
     const response = await fetcher(new URL("/v1/connections", relay), {
       method: "POST",
@@ -1428,9 +1489,35 @@ async function requestAdmission(
   };
 
   let attempt: { response: Response; body: PaymentBody };
+  let recoveredLease = options.paymentLease;
+
+  if (options.payment?.store && !options.paymentLease) {
+    const savedClaim = await options.payment.store.loadClaim(options.nodeId.toLowerCase());
+
+    if (savedClaim && validSavedClaim(savedClaim, relay, options.nodeId)) {
+      options.payment.onStatus?.("waiting_settlement", savedClaim.challenge);
+
+      try {
+        const recovered = await pollPaymentClaim(savedClaim, options.signal, fetcher);
+        recoveredLease = recovered.lease;
+        options.payment.onStatus?.("settled", savedClaim.challenge);
+      } catch (error) {
+        if (
+          !(error instanceof ZaptunnelError) ||
+          !["payment_expired", "invalid_claim"].includes(error.code)
+        ) {
+          throw error;
+        }
+
+        await options.payment.store.clearClaim(options.nodeId.toLowerCase());
+      }
+    } else if (savedClaim) {
+      await options.payment.store.clearClaim(options.nodeId.toLowerCase());
+    }
+  }
 
   try {
-    attempt = await send();
+    attempt = await send(undefined, recoveredLease);
   } catch (error) {
     if (options.signal?.aborted) {
       throw new ZaptunnelError("the relay admission request was aborted", {
@@ -1451,10 +1538,14 @@ async function requestAdmission(
       attempt.body.request_id ?? attempt.response.headers.get("x-request-id") ?? undefined;
 
     if (!options.payment) throw new ZaptunnelPaymentRequiredError(challenge, { requestId });
+    const issuedClaim = parsePaymentClaim(relay, options.nodeId, challenge, attempt.body);
 
-    let preimage: string;
+    await options.payment.store?.saveClaim(options.nodeId.toLowerCase(), issuedClaim);
+    options.payment.onStatus?.("paying", challenge);
+
+    let paymentResult: string | void;
     try {
-      preimage = (await options.payment.payInvoice(challenge)).toLowerCase();
+      paymentResult = await options.payment.payInvoice(challenge);
     } catch (error) {
       throw new ZaptunnelError("the wallet did not complete the connection payment", {
         code: "payment_failed",
@@ -1463,33 +1554,51 @@ async function requestAdmission(
       });
     }
 
-    if (!/^[0-9a-f]{64}$/.test(preimage)) {
-      throw new ZaptunnelError("the wallet returned an invalid payment preimage", {
-        code: "invalid_preimage",
-        requestId
-      });
-    }
+    if (paymentResult === undefined) {
+      options.payment.onStatus?.("waiting_settlement", challenge);
+      const claimed = await pollPaymentClaim(issuedClaim, options.signal, fetcher);
+      options.payment.onStatus?.("settled", challenge);
+      attempt = await send(undefined, claimed.lease);
+    } else {
+      const preimage = paymentResult.toLowerCase();
 
-    const protocol = selectPaymentProtocol(options.payment.protocol ?? "auto", challenge.protocols);
-    const authorization =
-      protocol === "mpp"
-        ? `Payment ${encodeBase64UrlJson({
-            challenge: attempt.body.mpp_challenge,
-            payload: { preimage }
-          })}`
-        : `L402 ${attempt.body.l402_token}:${preimage}`;
+      if (!/^[0-9a-f]{64}$/.test(preimage)) {
+        throw new ZaptunnelError("the wallet returned an invalid payment preimage", {
+          code: "invalid_preimage",
+          requestId
+        });
+      }
 
-    try {
-      attempt = await send(authorization);
-    } catch (error) {
-      throw new ZaptunnelError("could not redeem the connection payment", {
-        code: "relay_unreachable",
-        requestId,
-        cause: error
-      });
+      const protocol = selectPaymentProtocol(options.payment.protocol ?? "auto", challenge.protocols);
+      const authorization =
+        protocol === "mpp"
+          ? `Payment ${encodeBase64UrlJson({
+              challenge: attempt.body.mpp_challenge,
+              payload: { preimage }
+            })}`
+          : `L402 ${attempt.body.l402_token}:${preimage}`;
+
+      try {
+        attempt = await send(authorization);
+      } catch (error) {
+        throw new ZaptunnelError("could not redeem the connection payment", {
+          code: "relay_unreachable",
+          requestId,
+          cause: error
+        });
+      }
+
+      if (attempt.response.ok) options.payment.onStatus?.("settled", challenge);
     }
   }
 
+  return parseAdmissionAttempt(attempt);
+}
+
+function parseAdmissionAttempt(attempt: {
+  response: Response;
+  body: Partial<AdmissionResponse> & { error?: string };
+}): AdmissionResponse {
   const { response, body } = attempt;
   const requestId = body.request_id ?? response.headers.get("x-request-id") ?? undefined;
 
@@ -1552,6 +1661,149 @@ function parsePaymentChallenge(body: {
     paymentHash: body.payment_hash!,
     protocols: Object.freeze(protocols),
     quoteId: body.quote_id
+  });
+}
+
+function parsePaymentClaim(
+  relay: URL,
+  nodeId: string,
+  challenge: ZaptunnelPaymentChallenge,
+  body: {
+    claim_path?: string;
+    claim_token?: string;
+    expires_at?: number;
+    quote_id?: string;
+  }
+): ZaptunnelPaymentClaim {
+  if (
+    typeof body.claim_path !== "string" ||
+    !body.claim_path.startsWith("/") ||
+    body.claim_path.startsWith("//") ||
+    typeof body.claim_token !== "string" ||
+    body.claim_token.length < 32 ||
+    !Number.isSafeInteger(body.expires_at) ||
+    typeof body.quote_id !== "string"
+  ) {
+    throw new ZaptunnelError("the relay returned an invalid payment claim", {
+      code: "invalid_relay_response",
+      status: 402
+    });
+  }
+
+  return Object.freeze({
+    relay: relay.origin,
+    nodeId: nodeId.toLowerCase(),
+    quoteId: body.quote_id,
+    claimPath: body.claim_path,
+    claimToken: body.claim_token,
+    expiresAt: body.expires_at!,
+    challenge
+  });
+}
+
+function validSavedClaim(claim: ZaptunnelPaymentClaim, relay: URL, nodeId: string): boolean {
+  return (
+    claim.relay === relay.origin &&
+    claim.nodeId === nodeId.toLowerCase() &&
+    claim.claimPath.startsWith("/") &&
+    !claim.claimPath.startsWith("//") &&
+    claim.claimToken.length >= 32 &&
+    claim.challenge?.quoteId === claim.quoteId
+  );
+}
+
+async function pollPaymentClaim(
+  claim: ZaptunnelPaymentClaim,
+  signal: AbortSignal | undefined,
+  fetcher: typeof fetch
+): Promise<{ lease: string; leaseExpiresAt: number }> {
+  const claimUrl = new URL(claim.claimPath, claim.relay);
+
+  if (claimUrl.origin !== new URL(claim.relay).origin) {
+    throw new ZaptunnelError("the saved payment claim points outside its relay", {
+      code: "invalid_claim"
+    });
+  }
+
+  while (true) {
+    let response: Response;
+
+    try {
+      response = await fetcher(claimUrl, {
+        method: "POST",
+        headers: { authorization: `ZaptunnelClaim ${claim.claimToken}` },
+        signal
+      });
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new ZaptunnelError("payment settlement polling was aborted", {
+          code: "request_aborted",
+          cause: error
+        });
+      }
+
+      throw new ZaptunnelError("could not poll the payment settlement", {
+        code: "relay_unreachable",
+        cause: error
+      });
+    }
+
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      lease?: string;
+      lease_expires_at?: number;
+    };
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+
+    if (response.status === 202 || response.status === 429) {
+      const retrySeconds = Number(response.headers.get("retry-after") ?? "2");
+      const retryMs = Number.isFinite(retrySeconds)
+        ? Math.min(Math.max(retrySeconds * 1_000, 250), 30_000)
+        : 2_000;
+      await waitForPaymentPoll(retryMs, signal);
+      continue;
+    }
+
+    if (response.ok) {
+      if (typeof body.lease !== "string" || !Number.isSafeInteger(body.lease_expires_at)) {
+        throw new ZaptunnelError("the relay returned an invalid paid claim", {
+          code: "invalid_relay_response",
+          status: response.status,
+          requestId
+        });
+      }
+
+      return { lease: body.lease, leaseExpiresAt: body.lease_expires_at! };
+    }
+
+    const code = body.error ?? "payment_status_unavailable";
+    throw new ZaptunnelError(`Zaptunnel payment claim failed: ${code}`, {
+      code,
+      status: response.status,
+      requestId
+    });
+  }
+}
+
+async function waitForPaymentPoll(delayMs: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ZaptunnelError("payment settlement polling was aborted", { code: "request_aborted" }));
+      return;
+    }
+
+    const timer = setTimeout(finish, delayMs);
+    signal?.addEventListener("abort", abort, { once: true });
+
+    function finish() {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }
+
+    function abort() {
+      clearTimeout(timer);
+      reject(new ZaptunnelError("payment settlement polling was aborted", { code: "request_aborted" }));
+    }
   });
 }
 

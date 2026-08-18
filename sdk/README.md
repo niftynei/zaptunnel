@@ -86,17 +86,46 @@ const node = createConnectionManager({
 });
 ```
 
-The callback must return the 32-byte payment preimage as lowercase hex. The SDK
-never receives wallet keys. After the relay verifies the proof, it returns a
-paid lease and the connection manager automatically uses that lease for later
-transport reconnects without paying again. A lease permits one concurrent
-logical connection and expires according to the relay's quoted terms.
+When the wallet returns a 32-byte payment preimage, the SDK immediately redeems
+it through the selected MPP or L402 envelope. The SDK never receives wallet
+keys. After the relay verifies payment, it returns a paid lease and the
+connection manager automatically uses that lease for later transport reconnects
+without paying again. A lease permits one concurrent logical connection and
+expires according to the relay's quoted terms.
+
+External wallets and QR flows can return `void`. The SDK then polls the relay,
+which observes settlement on its billing CLN node:
+
+```ts
+let pendingClaim;
+
+const node = createConnectionManager({
+  nodeId,
+  address,
+  rune,
+  payment: {
+    payInvoice: async (challenge) => {
+      showLightningQr(challenge.invoice);
+      // No preimage is available in this browser.
+    },
+    store: {
+      loadClaim: () => pendingClaim,
+      saveClaim: (_nodeId, claim) => { pendingClaim = claim; },
+      clearClaim: () => { pendingClaim = undefined; }
+    },
+    onStatus: (status) => renderPaymentStatus(status)
+  }
+});
+```
+
+The optional store allows a page reload to recover the same payment and lease
+without paying again. A stored claim contains a bearer secret: keep it out of
+URLs and logs, and use protected application storage. The SDK deliberately does
+not choose `localStorage` on the application's behalf.
 
 Without `payment.payInvoice`, admission throws
-`ZaptunnelPaymentRequiredError`. Its safe `challenge` property can be rendered
-as a QR code or passed to a separate payment UI. A wallet that does not return
-the preimage cannot complete the current automatic flow; settlement polling for
-external-wallet QR payments remains a future extension.
+`ZaptunnelPaymentRequiredError`. Its safe `challenge` property contains no
+claim secret and can be rendered as a QR code or passed to a payment UI.
 
 The HTTP envelopes follow the evolving
 [MPP Lightning charge draft](https://paymentauth.org/draft-lightning-charge-00.html)
@@ -308,6 +337,9 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `payment_required` | Free slots are occupied and the relay offered a Lightning invoice |
 | `payment_failed` | The application wallet did not complete payment |
 | `invalid_preimage` | The supplied payment proof does not match the invoice |
+| `payment_expired` | An external-wallet invoice was not observed as paid before its grace period ended |
+| `invalid_claim` | A saved external-wallet claim secret is invalid or no longer exists |
+| `payment_status_unavailable` | The relay cannot currently reconcile settlement with its billing node |
 | `invalid_lease` | The paid lease is invalid, expired, or scoped to another node |
 | `lease_in_use` | The paid lease already has a pending or active connection |
 | `invalid_chain_hash` | `chainHash` is not a 32-byte hexadecimal BOLT chain hash |

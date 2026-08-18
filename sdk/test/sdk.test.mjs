@@ -402,6 +402,8 @@ test("payment-required admission exposes a typed challenge without invoking a wa
     new Response(
       JSON.stringify({
         amount_sats: 10,
+        claim_path: "/v1/payments/zq_test/claim",
+        claim_token: `zc_${"a".repeat(43)}`,
         error: "payment_required",
         expires_at: 2_000_000_000,
         invoice: "lnbc10n1test",
@@ -446,6 +448,8 @@ for (const protocol of ["mpp", "l402"]) {
         return new Response(
           JSON.stringify({
             amount_sats: 10,
+            claim_path: "/v1/payments/zq_test/claim",
+            claim_token: `zc_${"a".repeat(43)}`,
             error: "payment_required",
             expires_at: 2_000_000_000,
             invoice: "lnbc10n1test",
@@ -494,6 +498,166 @@ for (const protocol of ["mpp", "l402"]) {
     }
   });
 }
+
+test("SDK polls settlement when an external wallet does not return a preimage", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const statuses = [];
+  let saved;
+
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: url.toString(), init });
+
+    if (requests.length === 1) {
+      return new Response(
+        JSON.stringify({
+          amount_sats: 10,
+          claim_path: "/v1/payments/zq_poll/claim",
+          claim_token: `zc_${"b".repeat(43)}`,
+          error: "payment_required",
+          expires_at: 2_000_000_000,
+          invoice: "lnbc10n1external",
+          l402_token: "signed-token",
+          mpp_challenge: {
+            id: "zq_poll",
+            realm: "relay.zapptunnel.com",
+            method: "lightning",
+            intent: "charge",
+            request: "encoded-request",
+            expires: "2033-05-18T03:33:20Z"
+          },
+          payment_hash: "aa".repeat(32),
+          payment_protocols: ["mpp", "l402"],
+          quote_id: "zq_poll",
+          retry_after_ms: 2_000
+        }),
+        { status: 402, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    if (requests.length === 2) {
+      return new Response(JSON.stringify({ status: "pending" }), {
+        status: 202,
+        headers: { "content-type": "application/json", "retry-after": "0" }
+      });
+    }
+
+    if (requests.length === 3) {
+      return new Response(
+        JSON.stringify({ status: "paid", lease: "polled-lease", lease_expires_at: 2_000_000_100 }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    return new Response(JSON.stringify({ websocket_path: "/v1/connect/test" }), {
+      status: 201,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  const store = {
+    loadClaim: async () => saved,
+    saveClaim: async (_nodeId, claim) => {
+      saved = claim;
+    },
+    clearClaim: async () => {
+      saved = undefined;
+    }
+  };
+
+  try {
+    await assert.rejects(
+      connect({
+        nodeId,
+        address: "node.example.com:9735",
+        rune: "readonly",
+        payment: {
+          payInvoice: async () => undefined,
+          store,
+          onStatus: (status) => statuses.push(status)
+        }
+      }),
+      (error) =>
+        error instanceof ZaptunnelError &&
+        (error.code === "connection_failed" || error.code === "connection_closed")
+    );
+
+    assert.deepEqual(statuses, ["paying", "waiting_settlement", "settled"]);
+    assert.equal(saved.quoteId, "zq_poll");
+    assert.match(requests[1].init.headers.authorization, /^ZaptunnelClaim zc_/);
+    assert.equal(requests[3].init.headers["x-zaptunnel-lease"], "polled-lease");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SDK recovers a saved external-wallet claim without requesting another payment", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let payCalls = 0;
+  const savedClaim = {
+    relay: "https://relay.zapptunnel.com",
+    nodeId,
+    quoteId: "zq_saved",
+    claimPath: "/v1/payments/zq_saved/claim",
+    claimToken: `zc_${"s".repeat(43)}`,
+    expiresAt: 2_000_000_000,
+    challenge: {
+      amountSats: 10,
+      expiresAt: 2_000_000_000,
+      invoice: "lnbc10n1saved",
+      paymentHash: "aa".repeat(32),
+      protocols: ["mpp", "l402"],
+      quoteId: "zq_saved"
+    }
+  };
+
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: url.toString(), init });
+
+    if (requests.length === 1) {
+      return new Response(
+        JSON.stringify({ status: "paid", lease: "saved-lease", lease_expires_at: 2_000_000_100 }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    return new Response(JSON.stringify({ websocket_path: "/v1/connect/test" }), {
+      status: 201,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    await assert.rejects(
+      connect({
+        nodeId,
+        address: "node.example.com:9735",
+        rune: "readonly",
+        payment: {
+          payInvoice: async () => {
+            payCalls += 1;
+          },
+          store: {
+            loadClaim: async () => savedClaim,
+            saveClaim: async () => assert.fail("a new claim must not replace a recoverable claim"),
+            clearClaim: async () => assert.fail("a paid claim must not be cleared")
+          }
+        }
+      }),
+      (error) =>
+        error instanceof ZaptunnelError &&
+        (error.code === "connection_failed" || error.code === "connection_closed")
+    );
+
+    assert.equal(payCalls, 0);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].init.headers.authorization, `ZaptunnelClaim ${savedClaim.claimToken}`);
+    assert.equal(requests[1].init.headers["x-zaptunnel-lease"], "saved-lease");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("restrictive gossip filter uses the BOLT 7 no-gossip timestamp range", () => {
   const message = encodeRestrictiveGossipTimestampFilter(BITCOIN_MAINNET_CHAIN_HASH);
