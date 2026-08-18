@@ -35,6 +35,15 @@ defmodule ZaptunnelRelay.MetricsTest do
     Telemetry.emit([:session, :start], %{count: 1})
     Telemetry.emit([:payment, :challenge], %{count: 1}, %{result: :ok})
     Telemetry.emit([:payment, :redeem], %{count: 1}, %{protocol: :mpp, result: :ok})
+    Telemetry.emit([:payment, :claim], %{count: 1}, %{result: :pending})
+
+    Telemetry.emit(
+      [:payment, :settlement],
+      %{count: 1, delay_ms: 1_250},
+      %{result: :matched}
+    )
+
+    Telemetry.emit([:payment, :watcher], %{count: 1}, %{result: :error})
 
     Telemetry.emit(
       [:session, :stop],
@@ -61,6 +70,10 @@ defmodule ZaptunnelRelay.MetricsTest do
     assert body =~ "zaptunnel_session_capacity 10000"
     assert body =~ ~s(zaptunnel_payment_challenges_total{result="success"} 1)
     assert body =~ ~s(zaptunnel_payment_redemptions_total{protocol="mpp",result="success"} 1)
+    assert body =~ ~s(zaptunnel_payment_claims_total{result="pending"} 1)
+    assert body =~ ~s(zaptunnel_payment_settlements_total{result="matched"} 1)
+    assert body =~ "zaptunnel_payment_settlement_delay_seconds_sum 1.25"
+    assert body =~ "zaptunnel_payment_watcher_errors_total 1"
     assert body =~ "zaptunnel_ready 1"
     refute body =~ @node_id
 

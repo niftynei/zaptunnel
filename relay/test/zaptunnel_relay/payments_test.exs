@@ -51,9 +51,79 @@ defmodule ZaptunnelRelay.PaymentsTest do
     assert challenge.protocols == ["mpp", "l402"]
     assert challenge.invoice == "lnbc10n1testinvoice"
     assert challenge.payment_hash == @payment_hash
+    assert challenge.claim_path == "/v1/payments/#{challenge.quote_id}/claim"
+    assert challenge.claim_token =~ ~r/^zc_[A-Za-z0-9_-]{43}$/
     assert ["Payment " <> _, "L402 " <> _] = challenge.www_authenticate
     assert_receive {:invoice, opts}
     assert opts[:amount_sats] == 10
+  end
+
+  test "a hashed claim token receives the same lease after observed settlement" do
+    assert {:ok, challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com")
+    assert {:pending, 2_000} = Payments.claim(challenge.quote_id, challenge.claim_token)
+    assert {:error, :invalid_claim_token} = Payments.claim(challenge.quote_id, "wrong-token")
+
+    assert :ok =
+             Payments.record_settlement(%{
+               label: challenge.quote_id,
+               payment_hash: @payment_hash,
+               amount_received_msat: 10_000,
+               paid_at: System.system_time(:second),
+               pay_index: 7
+             })
+
+    assert Payments.last_pay_index() == 7
+    assert {:ok, first} = Payments.claim(challenge.quote_id, challenge.claim_token)
+    assert {:ok, second} = Payments.claim(challenge.quote_id, challenge.claim_token)
+    assert first == second
+    assert {:ok, first.id} == Payments.authorize_lease(first.token, @node_id)
+  end
+
+  test "settlement cursor advances while invalid payments cannot issue a lease" do
+    assert {:ok, challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com")
+
+    assert {:error, :invalid_settlement} =
+             Payments.record_settlement(%{
+               label: challenge.quote_id,
+               payment_hash: String.duplicate("00", 32),
+               amount_received_msat: 10_000,
+               paid_at: System.system_time(:second),
+               pay_index: 8
+             })
+
+    assert Payments.last_pay_index() == 8
+    assert {:pending, _retry} = Payments.claim(challenge.quote_id, challenge.claim_token)
+  end
+
+  test "malformed settlement events do not advance the durable cursor" do
+    assert {:error, :stale_settlement} =
+             Payments.record_settlement(%{pay_index: 9, label: "missing-payment-fields"})
+
+    assert Payments.last_pay_index() == 0
+  end
+
+  test "bounds unpaid quotes per hashed source before creating another invoice" do
+    previous =
+      Application.fetch_env!(:zaptunnel_relay, :payment_max_pending_quotes_per_source)
+
+    Application.put_env(:zaptunnel_relay, :payment_max_pending_quotes_per_source, 1)
+
+    on_exit(fn ->
+      Application.put_env(
+        :zaptunnel_relay,
+        :payment_max_pending_quotes_per_source,
+        previous
+      )
+    end)
+
+    source = {192, 0, 2, 10}
+    assert {:ok, _challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com", source)
+    assert_receive {:invoice, _opts}
+
+    assert {:error, :payment_quote_limit} =
+             Payments.challenge(@node_id, "relay.zapptunnel.com", source)
+
+    refute_receive {:invoice, _opts}
   end
 
   test "MPP tokens use canonical JSON and accept optional base64url padding" do

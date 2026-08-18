@@ -9,8 +9,8 @@ defmodule ZaptunnelRelay.Payments do
 
   def enabled?, do: Application.fetch_env!(:zaptunnel_relay, :payments_enabled)
 
-  def challenge(node_id, realm) do
-    GenServer.call(__MODULE__, {:challenge, node_id, realm}, payment_timeout())
+  def challenge(node_id, realm, source \\ nil) do
+    GenServer.call(__MODULE__, {:challenge, node_id, realm, source}, payment_timeout())
   end
 
   def redeem(authorization, node_id) do
@@ -23,6 +23,20 @@ defmodule ZaptunnelRelay.Payments do
     GenServer.call(__MODULE__, {:authorize_lease, token, node_id})
   end
 
+  def claim(quote_id, claim_token) do
+    GenServer.call(__MODULE__, {:claim, quote_id, claim_token})
+  end
+
+  def last_pay_index, do: GenServer.call(__MODULE__, :last_pay_index)
+
+  def record_settlement(payment) do
+    GenServer.call(__MODULE__, {:record_settlement, payment})
+  end
+
+  def watcher_heartbeat(status) when status in [:healthy, :unhealthy] do
+    GenServer.cast(__MODULE__, {:watcher_heartbeat, status})
+  end
+
   def reset, do: GenServer.call(__MODULE__, :reset)
 
   @impl true
@@ -30,10 +44,19 @@ defmodule ZaptunnelRelay.Payments do
     if enabled?() and byte_size(token_secret()) < 32 do
       {:stop, :payment_token_secret_too_short}
     else
-      {table, quotes} = open_store(Application.get_env(:zaptunnel_relay, :payment_state_path))
+      {table, quotes, last_pay_index} =
+        open_store(Application.get_env(:zaptunnel_relay, :payment_state_path))
+
       {quotes, expired_ids} = prune(quotes)
       delete_expired(table, expired_ids)
-      {:ok, %{quotes: quotes, table: table}}
+
+      {:ok,
+       %{
+         quotes: quotes,
+         table: table,
+         last_pay_index: last_pay_index,
+         watcher_healthy_at: nil
+       }}
     end
   end
 
@@ -42,15 +65,18 @@ defmodule ZaptunnelRelay.Payments do
   def terminate(_reason, %{table: table}), do: :dets.close(table)
 
   @impl true
-  def handle_call({:challenge, node_id, realm}, _from, state) do
+  def handle_call({:challenge, node_id, realm, source}, _from, state) do
     id = random_id("zq_")
     amount_sats = Application.fetch_env!(:zaptunnel_relay, :payment_price_sats)
     ttl_ms = Application.fetch_env!(:zaptunnel_relay, :payment_quote_ttl_ms)
     description = "Zaptunnel connection lease for " <> abbreviate(node_id)
     provider = Application.fetch_env!(:zaptunnel_relay, :invoice_provider)
+    claim_token = "zc_" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+    source_hash = :crypto.mac(:hmac, :sha256, token_secret(), :erlang.term_to_binary(source))
 
     result =
-      with {:ok, invoice} <-
+      with :ok <- pending_quote_capacity(state.quotes, source_hash),
+           {:ok, invoice} <-
              provider.create_invoice(
                amount_sats: amount_sats,
                description: description,
@@ -69,6 +95,9 @@ defmodule ZaptunnelRelay.Payments do
           payment_hash: String.downcase(invoice.payment_hash),
           network: Application.fetch_env!(:zaptunnel_relay, :payment_network),
           expires_at: expires_at,
+          claim_token_hash: :crypto.hash(:sha256, claim_token),
+          source_hash: source_hash,
+          settled_at: nil,
           redeemed: nil
         }
 
@@ -84,6 +113,8 @@ defmodule ZaptunnelRelay.Payments do
 
         response = %{
           amount_sats: amount_sats,
+          claim_path: "/v1/payments/#{id}/claim",
+          claim_token: claim_token,
           expires_at: expires_at,
           invoice: quote.invoice,
           l402_token: l402_token,
@@ -91,6 +122,7 @@ defmodule ZaptunnelRelay.Payments do
           payment_hash: quote.payment_hash,
           protocols: ["mpp", "l402"],
           quote_id: id,
+          retry_after_ms: Application.fetch_env!(:zaptunnel_relay, :payment_claim_poll_ms),
           www_authenticate: [mpp_header, PaymentProtocol.l402_challenge(quote, l402_token)]
         }
 
@@ -117,7 +149,7 @@ defmodule ZaptunnelRelay.Payments do
          :ok <- verify_proof(proof, quote),
          :ok <- same_node(quote, node_id),
          :ok <- unexpired(quote.expires_at),
-         {:ok, lease, quote} <- redeem_quote(quote) do
+         {:ok, lease, quote} <- quote |> mark_settled() |> redeem_quote() do
       quotes = Map.put(state.quotes, quote.id, quote)
       persist(state.table, quote)
 
@@ -153,9 +185,50 @@ defmodule ZaptunnelRelay.Payments do
     {:reply, result, state}
   end
 
+  def handle_call({:claim, quote_id, claim_token}, _from, state) do
+    result =
+      with {:ok, quote} <- fetch_quote(state.quotes, quote_id),
+           :ok <- verify_claim_token(claim_token, quote) do
+        claim_quote(quote, state)
+      end
+
+    case result do
+      {:ok, lease, quote} ->
+        persist(state.table, quote)
+        quotes = Map.put(state.quotes, quote.id, quote)
+        ZaptunnelRelay.Telemetry.emit([:payment, :claim], %{count: 1}, %{result: :success})
+        {:reply, {:ok, lease}, %{state | quotes: quotes}}
+
+      {:pending, retry_after_ms} ->
+        ZaptunnelRelay.Telemetry.emit([:payment, :claim], %{count: 1}, %{result: :pending})
+        {:reply, {:pending, retry_after_ms}, state}
+
+      {:error, reason} ->
+        ZaptunnelRelay.Telemetry.emit([:payment, :claim], %{count: 1}, %{result: reason})
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:record_settlement, payment}, _from, state) do
+    {result, state} = record_payment(state, payment)
+    {:reply, result, state}
+  end
+
+  def handle_call(:last_pay_index, _from, state), do: {:reply, state.last_pay_index, state}
+
   def handle_call(:reset, _from, state) do
     if state.table, do: :dets.delete_all_objects(state.table)
-    {:reply, :ok, %{state | quotes: %{}}}
+
+    {:reply, :ok, %{state | quotes: %{}, last_pay_index: 0, watcher_healthy_at: nil}}
+  end
+
+  @impl true
+  def handle_cast({:watcher_heartbeat, :healthy}, state) do
+    {:noreply, %{state | watcher_healthy_at: System.monotonic_time(:millisecond)}}
+  end
+
+  def handle_cast({:watcher_heartbeat, :unhealthy}, state) do
+    {:noreply, %{state | watcher_healthy_at: nil}}
   end
 
   defp proof_quote_id(%{protocol: :mpp, quote_id: id}), do: {:ok, id}
@@ -195,7 +268,54 @@ defmodule ZaptunnelRelay.Payments do
 
   defp verify_preimage(_preimage, _quote), do: {:error, :invalid_preimage}
 
-  defp redeem_quote(%{redeemed: lease} = quote) when is_map(lease), do: {:ok, lease, quote}
+  defp verify_claim_token(token, %{claim_token_hash: expected}) when is_binary(token) do
+    supplied = :crypto.hash(:sha256, token)
+
+    if Plug.Crypto.secure_compare(supplied, expected),
+      do: :ok,
+      else: {:error, :invalid_claim_token}
+  end
+
+  defp verify_claim_token(_token, _quote), do: {:error, :invalid_claim_token}
+
+  defp claim_quote(%{redeemed: lease} = quote, _state) when is_map(lease),
+    do: redeem_quote(quote)
+
+  defp claim_quote(%{settled_at: settled_at} = quote, _state) when is_integer(settled_at),
+    do: redeem_quote(quote)
+
+  defp claim_quote(quote, state) do
+    grace_seconds = div(Application.fetch_env!(:zaptunnel_relay, :payment_claim_grace_ms), 1_000)
+
+    cond do
+      System.system_time(:second) <= quote.expires_at + grace_seconds ->
+        {:pending, Application.fetch_env!(:zaptunnel_relay, :payment_claim_poll_ms)}
+
+      watcher_healthy?(state) ->
+        {:error, :payment_expired}
+
+      true ->
+        {:error, :payment_status_unavailable}
+    end
+  end
+
+  defp watcher_healthy?(%{watcher_healthy_at: nil}), do: false
+
+  defp watcher_healthy?(%{watcher_healthy_at: timestamp}) do
+    max_age =
+      (Application.fetch_env!(:zaptunnel_relay, :payment_watch_timeout_seconds) + 10) * 1_000
+
+    System.monotonic_time(:millisecond) - timestamp <= max_age
+  end
+
+  defp mark_settled(%{settled_at: settled_at} = quote) when is_integer(settled_at), do: quote
+  defp mark_settled(quote), do: Map.put(quote, :settled_at, System.system_time(:second))
+
+  defp redeem_quote(%{redeemed: lease} = quote) when is_map(lease) do
+    if lease.expires_at >= System.system_time(:second),
+      do: {:ok, lease, quote},
+      else: {:error, :payment_expired}
+  end
 
   defp redeem_quote(quote) do
     lease_id = random_id("zl_")
@@ -224,6 +344,74 @@ defmodule ZaptunnelRelay.Payments do
     end
   end
 
+  defp record_payment(state, payment) do
+    with %{
+           pay_index: pay_index,
+           label: label,
+           payment_hash: payment_hash,
+           amount_received_msat: amount_received_msat,
+           paid_at: paid_at
+         }
+         when is_integer(pay_index) and pay_index > state.last_pay_index and
+                is_binary(label) and is_binary(payment_hash) and
+                is_integer(amount_received_msat) and is_integer(paid_at) <- payment do
+      case Map.fetch(state.quotes, label) do
+        {:ok, quote} ->
+          if valid_settlement?(payment, quote) do
+            {:ok, _lease, quote} =
+              quote
+              |> Map.put(:settled_at, payment.paid_at)
+              |> redeem_quote()
+
+            # Persist the paid quote before advancing the cursor. A crash may
+            # replay this payment, but it can never skip an unrecorded payment.
+            persist(state.table, quote)
+            state = advance_cursor(state, pay_index)
+
+            ZaptunnelRelay.Telemetry.emit(
+              [:payment, :settlement],
+              %{
+                count: 1,
+                delay_ms: max((System.system_time(:second) - payment.paid_at) * 1_000, 0)
+              },
+              %{result: :matched}
+            )
+
+            {:ok, %{state | quotes: Map.put(state.quotes, quote.id, quote)}}
+          else
+            ZaptunnelRelay.Telemetry.emit(
+              [:payment, :settlement],
+              %{count: 1, delay_ms: 0},
+              %{result: :invalid}
+            )
+
+            {{:error, :invalid_settlement}, advance_cursor(state, pay_index)}
+          end
+
+        :error ->
+          ZaptunnelRelay.Telemetry.emit(
+            [:payment, :settlement],
+            %{count: 1, delay_ms: 0},
+            %{result: :ignored}
+          )
+
+          {:ok, advance_cursor(state, pay_index)}
+      end
+    else
+      _stale_or_invalid -> {{:error, :stale_settlement}, state}
+    end
+  end
+
+  defp valid_settlement?(payment, quote),
+    do:
+      payment.payment_hash == quote.payment_hash and
+        payment.amount_received_msat >= quote.amount_sats * 1_000
+
+  defp advance_cursor(state, pay_index) do
+    persist_cursor(state.table, pay_index)
+    %{state | last_pay_index: pay_index}
+  end
+
   defp same_node(%{node_id: node_id}, node_id), do: :ok
   defp same_node(_quote, _node_id), do: {:error, :lease_node_mismatch}
 
@@ -239,6 +427,20 @@ defmodule ZaptunnelRelay.Payments do
        do: :ok
 
   defp validate_invoice(_invoice), do: {:error, :invalid_invoice_response}
+
+  defp pending_quote_capacity(quotes, source_hash) do
+    now = System.system_time(:second)
+    grace = div(Application.fetch_env!(:zaptunnel_relay, :payment_claim_grace_ms), 1_000)
+    maximum = Application.fetch_env!(:zaptunnel_relay, :payment_max_pending_quotes_per_source)
+
+    pending =
+      Enum.count(quotes, fn {_id, quote} ->
+        quote[:source_hash] == source_hash and is_nil(quote[:settled_at]) and
+          quote.expires_at + grace >= now
+      end)
+
+    if pending < maximum, do: :ok, else: {:error, :payment_quote_limit}
+  end
 
   defp sign(payload) do
     encoded = PaymentProtocol.encode(payload)
@@ -269,7 +471,11 @@ defmodule ZaptunnelRelay.Payments do
     Enum.reduce(quotes, {%{}, []}, fn {id, quote}, {kept, expired} ->
       lease_expires_at = get_in(quote, [:redeemed, :expires_at])
 
-      if quote.expires_at >= now or (is_integer(lease_expires_at) and lease_expires_at >= now) do
+      retention_seconds =
+        div(Application.fetch_env!(:zaptunnel_relay, :payment_quote_retention_ms), 1_000)
+
+      if quote.expires_at + retention_seconds >= now or
+           (is_integer(lease_expires_at) and lease_expires_at >= now) do
         {Map.put(kept, id, quote), expired}
       else
         {kept, [id | expired]}
@@ -277,18 +483,31 @@ defmodule ZaptunnelRelay.Payments do
     end)
   end
 
-  defp open_store(nil), do: {nil, %{}}
+  defp open_store(nil), do: {nil, %{}, 0}
 
   defp open_store(path) do
     :ok = File.mkdir_p(Path.dirname(path))
     table = :zaptunnel_payment_quotes
     {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), type: :set)
-    quotes = :dets.foldl(fn {id, quote}, acc -> Map.put(acc, id, quote) end, %{}, table)
-    {table, quotes}
+
+    {quotes, last_pay_index} =
+      :dets.foldl(
+        fn
+          {{:meta, :last_pay_index}, value}, {quotes, _cursor} -> {quotes, value}
+          {id, quote}, {quotes, cursor} -> {Map.put(quotes, id, quote), cursor}
+        end,
+        {%{}, 0},
+        table
+      )
+
+    {table, quotes, last_pay_index}
   end
 
   defp persist(nil, _quote), do: :ok
   defp persist(table, quote), do: :dets.insert(table, {quote.id, quote})
+
+  defp persist_cursor(nil, _value), do: :ok
+  defp persist_cursor(table, value), do: :dets.insert(table, {{:meta, :last_pay_index}, value})
 
   defp delete_expired(nil, _ids), do: :ok
   defp delete_expired(table, ids), do: Enum.each(ids, &:dets.delete(table, &1))

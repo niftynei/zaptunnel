@@ -12,7 +12,10 @@ defmodule ZaptunnelRelay.Metrics do
     [:zaptunnel_relay, :session, :start],
     [:zaptunnel_relay, :session, :stop],
     [:zaptunnel_relay, :payment, :challenge],
-    [:zaptunnel_relay, :payment, :redeem]
+    [:zaptunnel_relay, :payment, :redeem],
+    [:zaptunnel_relay, :payment, :claim],
+    [:zaptunnel_relay, :payment, :settlement],
+    [:zaptunnel_relay, :payment, :watcher]
   ]
 
   def start_link(opts \\ []) do
@@ -69,7 +72,12 @@ defmodule ZaptunnelRelay.Metrics do
       browser_bytes: 0,
       node_bytes: 0,
       payment_challenges: %{},
-      payment_redemptions: %{}
+      payment_redemptions: %{},
+      payment_claims: %{},
+      payment_settlements: %{},
+      payment_settlement_delay_ms: 0,
+      payment_settlement_delay_count: 0,
+      payment_watcher_errors: 0
     }
   end
 
@@ -125,6 +133,27 @@ defmodule ZaptunnelRelay.Metrics do
   defp record(state, [:zaptunnel_relay, :payment, :redeem], measurements, metadata) do
     label = "#{metadata[:protocol]}:#{result_label(metadata[:result])}"
     update_in(state.payment_redemptions, &increment_by(&1, label, measurements[:count]))
+  end
+
+  defp record(state, [:zaptunnel_relay, :payment, :claim], measurements, metadata) do
+    update_in(
+      state.payment_claims,
+      &increment_by(&1, Atom.to_string(metadata[:result]), measurements[:count])
+    )
+  end
+
+  defp record(state, [:zaptunnel_relay, :payment, :settlement], measurements, metadata) do
+    state
+    |> update_in(
+      [:payment_settlements],
+      &increment_by(&1, Atom.to_string(metadata[:result]), measurements[:count])
+    )
+    |> Map.update!(:payment_settlement_delay_ms, &(&1 + measurements[:delay_ms]))
+    |> Map.update!(:payment_settlement_delay_count, &(&1 + measurements[:count]))
+  end
+
+  defp record(state, [:zaptunnel_relay, :payment, :watcher], measurements, _metadata) do
+    Map.update!(state, :payment_watcher_errors, &(&1 + measurements[:count]))
   end
 
   defp record(state, _event, _measurements, _metadata), do: state
@@ -220,6 +249,33 @@ defmodule ZaptunnelRelay.Metrics do
         "counter"
       ),
       payment_redemptions(metrics.payment_redemptions),
+      help("zaptunnel_payment_claims_total", "Payment lease claims by outcome", "counter"),
+      labelled("zaptunnel_payment_claims_total", "result", metrics.payment_claims),
+      help(
+        "zaptunnel_payment_settlements_total",
+        "Billing-node settlements by reconciliation outcome",
+        "counter"
+      ),
+      labelled("zaptunnel_payment_settlements_total", "result", metrics.payment_settlements),
+      help(
+        "zaptunnel_payment_settlement_delay_seconds",
+        "Delay between CLN settlement and relay observation",
+        "summary"
+      ),
+      sample(
+        "zaptunnel_payment_settlement_delay_seconds_sum",
+        metrics.payment_settlement_delay_ms / 1_000
+      ),
+      sample(
+        "zaptunnel_payment_settlement_delay_seconds_count",
+        metrics.payment_settlement_delay_count
+      ),
+      help(
+        "zaptunnel_payment_watcher_errors_total",
+        "Billing settlement watcher failures",
+        "counter"
+      ),
+      sample("zaptunnel_payment_watcher_errors_total", metrics.payment_watcher_errors),
       help("zaptunnel_ready", "Whether the relay accepts new admissions", "gauge"),
       sample("zaptunnel_ready", if(admission.draining, do: 0, else: 1)),
       help("zaptunnel_session_capacity", "Configured global session capacity", "gauge"),

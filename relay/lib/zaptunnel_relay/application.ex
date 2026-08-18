@@ -11,6 +11,7 @@ defmodule ZaptunnelRelay.Application do
         ZaptunnelRelay.Admission,
         ZaptunnelRelay.Payments,
         ZaptunnelRelay.Metrics,
+        ZaptunnelRelay.Billing.SettlementWatcher,
         ZaptunnelRelay.RateLimiter,
         {Task.Supervisor, name: ZaptunnelRelay.ProbeSupervisor},
         ZaptunnelRelay.EndpointVerifier

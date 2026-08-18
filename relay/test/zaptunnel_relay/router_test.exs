@@ -206,6 +206,8 @@ defmodule ZaptunnelRelay.RouterTest do
     body = Jason.decode!(challenge.resp_body)
     assert challenge.status == 402
     assert body["payment_protocols"] == ["mpp", "l402"]
+    assert body["claim_path"] == "/v1/payments/#{body["quote_id"]}/claim"
+    assert body["claim_token"] =~ ~r/^zc_/
     assert length(get_resp_header(challenge, "www-authenticate")) == 2
     assert get_resp_header(challenge, "cache-control") == ["no-store"]
 
@@ -230,6 +232,49 @@ defmodule ZaptunnelRelay.RouterTest do
     assert [_receipt] = get_resp_header(paid, "payment-receipt")
   end
 
+  test "polls a protected claim until CLN settlement is observed" do
+    Application.put_env(:zaptunnel_relay, :payments_enabled, true)
+    Application.put_env(:zaptunnel_relay, :free_sessions_per_node, 0)
+    Application.put_env(:zaptunnel_relay, :invoice_provider, InvoiceProvider)
+    Application.put_env(:zaptunnel_relay, :payment_token_secret, String.duplicate("k", 32))
+
+    Application.put_env(
+      :zaptunnel_relay,
+      :router_test_invoice,
+      {:ok,
+       %{
+         invoice: "lnbc1poll",
+         payment_hash: String.duplicate("11", 32),
+         expires_at: System.system_time(:second) + 300
+       }}
+    )
+
+    body = post_connection() |> Map.fetch!(:resp_body) |> Jason.decode!()
+
+    pending = claim_payment(body["claim_path"], body["claim_token"])
+    assert pending.status == 202
+    assert get_resp_header(pending, "retry-after") == ["2"]
+    assert get_resp_header(pending, "cache-control") == ["no-store"]
+
+    assert :ok =
+             Payments.record_settlement(%{
+               label: body["quote_id"],
+               payment_hash: String.duplicate("11", 32),
+               amount_received_msat: 10_000,
+               paid_at: System.system_time(:second),
+               pay_index: 1
+             })
+
+    paid = claim_payment(body["claim_path"], body["claim_token"])
+    assert paid.status == 200
+    assert %{"status" => "paid", "lease" => lease} = Jason.decode!(paid.resp_body)
+    assert is_binary(lease)
+
+    stolen = claim_payment(body["claim_path"], String.duplicate("x", 40))
+    assert stolen.status == 401
+    assert %{"error" => "invalid_claim"} = Jason.decode!(stolen.resp_body)
+  end
+
   test "payment credentials cannot bypass admission while payments are disabled" do
     Application.put_env(:zaptunnel_relay, :payments_enabled, false)
     Application.put_env(:zaptunnel_relay, :free_sessions_per_node, 0)
@@ -252,6 +297,13 @@ defmodule ZaptunnelRelay.RouterTest do
     :post
     |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: address}))
     |> put_req_header("content-type", "application/json")
+    |> Router.call([])
+  end
+
+  defp claim_payment(path, token) do
+    :post
+    |> conn(path, "")
+    |> put_req_header("authorization", "ZaptunnelClaim #{token}")
     |> Router.call([])
   end
 

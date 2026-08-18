@@ -48,6 +48,16 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
 
     assert payment_hash =~ ~r/^[0-9a-f]{64}$/
     assert expires_at > System.system_time(:second)
+
+    assert {:error, {:commando_rpc_error, 904}} =
+             Commando.call(
+               "waitanyinvoice",
+               %{lastpay_index: 0, timeout: 0},
+               address: "127.0.0.1:#{lightning_port}",
+               node_id: node_id,
+               rune: rune,
+               timeout: 5_000
+             )
   end
 
   test "the packaged SDK connects through SOCKS-routed onion admission and executes Commando getinfo" do

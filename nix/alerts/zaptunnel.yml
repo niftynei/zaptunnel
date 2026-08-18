@@ -59,6 +59,15 @@ groups:
           summary: Admission rate limiting is elevated
           description: The relay rejected more than 50 admission requests in five minutes.
 
+      - alert: ZaptunnelPaymentWatcherErrors
+        expr: increase(zaptunnel_payment_watcher_errors_total{job="zapptunnel"}[5m]) > 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Billing settlement watcher is repeatedly failing
+          description: Paid connections may remain pending until the relay can observe CLN invoices again.
+
       - alert: ZaptunnelSystemdUnitFailed
         expr: node_systemd_unit_state{job="node",state="failed"} == 1
         for: 5m

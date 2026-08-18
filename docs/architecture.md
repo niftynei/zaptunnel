@@ -134,13 +134,21 @@ slot is released when either side disconnects, establishment times out, or the
 session process terminates. Pending sessions have a short handshake timeout so
 an incomplete WebSocket or BOLT-8 connection cannot hold a slot indefinitely.
 
-The relay should return a stable, machine-readable `connection_limit` error
-when all free slots are occupied. Version 1 has no paid override. A later
-version may respond with `payment_required` and a quote for additional
-capacity. Successful payment produces a short-lived, single-use admission
-token bound to the destination node, supplied address, and connection request.
-Payment and admission happen before the WebSocket session, so adding them does
-not change BOLT-8 or give the relay access to tunneled traffic.
+When all free slots are occupied, a payment-enabled relay returns
+`payment_required` with one BOLT11 invoice represented through both MPP and
+L402. Successful payment produces an expiring lease bound to the destination
+node. One lease permits one concurrent logical connection and can be reused
+for transport reconnects until expiry. Payment and admission happen before the
+WebSocket session, so this does not change BOLT-8 or give the relay access to
+tunneled traffic.
+
+Wallets that return a preimage redeem through MPP or L402. For QR and external
+wallets, each quote also has an independent 256-bit claim secret; only its hash
+is stored. One background billing watcher advances a durable CLN
+`waitanyinvoice` cursor and marks matching quotes paid. Browsers poll the claim
+endpoint and receive the same idempotent lease after settlement. Quote ID alone
+never authorizes a claim, and claim secrets must not appear in URLs, logs, or
+metrics.
 
 The endpoint handshake authenticates the destination, not the browser asking
 for a connection. The three free slots are therefore a public shared allowance

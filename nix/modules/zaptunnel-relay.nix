@@ -158,6 +158,36 @@ in {
         description = "Lifetime of a paid logical connection lease, including reconnects.";
       };
 
+      claimGraceSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 60;
+        description = "Grace period for discovering payments made immediately before invoice expiry.";
+      };
+
+      quoteRetentionSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 86400;
+        description = "Retention for durable quote reconciliation after billing-node outages.";
+      };
+
+      maxPendingQuotesPerSource = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 5;
+        description = "Maximum simultaneous unpaid payment quotes per source address.";
+      };
+
+      claimPollSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 2;
+        description = "Browser polling interval advertised by the payment claim endpoint.";
+      };
+
+      watchTimeoutSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
+        description = "Duration of each billing-node waitanyinvoice request.";
+      };
+
       billingNodeId = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -305,6 +335,11 @@ in {
             ZAPTUNNEL_PAYMENT_NETWORK = cfg.payments.network;
             ZAPTUNNEL_PAYMENT_QUOTE_TTL_MS = toString (cfg.payments.quoteTtlSeconds * 1000);
             ZAPTUNNEL_PAYMENT_LEASE_TTL_MS = toString (cfg.payments.leaseTtlSeconds * 1000);
+            ZAPTUNNEL_PAYMENT_CLAIM_GRACE_MS = toString (cfg.payments.claimGraceSeconds * 1000);
+            ZAPTUNNEL_PAYMENT_QUOTE_RETENTION_MS = toString (cfg.payments.quoteRetentionSeconds * 1000);
+            ZAPTUNNEL_PAYMENT_MAX_PENDING_QUOTES_PER_SOURCE = toString cfg.payments.maxPendingQuotesPerSource;
+            ZAPTUNNEL_PAYMENT_CLAIM_POLL_MS = toString (cfg.payments.claimPollSeconds * 1000);
+            ZAPTUNNEL_PAYMENT_WATCH_TIMEOUT_SECONDS = toString cfg.payments.watchTimeoutSeconds;
             ZAPTUNNEL_PAYMENT_STATE_PATH = "/var/lib/zaptunnel-relay/payments.dets";
             ZAPTUNNEL_BILLING_NODE_ID = cfg.payments.billingNodeId;
             ZAPTUNNEL_BILLING_NODE_ADDRESS = cfg.payments.billingNodeAddress;

@@ -127,6 +127,9 @@ defmodule ZaptunnelRelay.Router do
         {:error, :billing_unavailable} ->
           json(conn, 503, %{error: "billing_unavailable"})
 
+        {:error, :payment_quote_limit} ->
+          json(conn, 429, %{error: "payment_quote_limit"})
+
         {:error, :endpoint_unverified} ->
           json(conn, 422, %{error: "endpoint_unverified"})
 
@@ -144,6 +147,57 @@ defmodule ZaptunnelRelay.Router do
 
         {:error, _reason} ->
           json(conn, 400, %{error: "invalid_connection_request"})
+      end
+    end)
+  end
+
+  post "/v1/payments/:quote_id/claim" do
+    relay_only(conn, fn conn ->
+      claim_token =
+        conn
+        |> get_req_header("authorization")
+        |> List.first()
+        |> parse_claim_authorization()
+
+      result =
+        with true <- ZaptunnelRelay.Payments.enabled?(),
+             :ok <- ZaptunnelRelay.RateLimiter.check(conn.remote_ip),
+             {:ok, token} <- claim_token do
+          ZaptunnelRelay.Payments.claim(quote_id, token)
+        else
+          false -> {:error, :not_found}
+          {:error, reason} -> {:error, reason}
+        end
+
+      conn = put_resp_header(conn, "cache-control", "no-store")
+
+      case result do
+        {:ok, lease} ->
+          json(conn, 200, %{
+            lease: lease.token,
+            lease_expires_at: lease.expires_at,
+            status: "paid"
+          })
+
+        {:pending, retry_after_ms} ->
+          conn
+          |> put_resp_header("retry-after", Integer.to_string(ceil(retry_after_ms / 1_000)))
+          |> json(202, %{status: "pending"})
+
+        {:error, :payment_expired} ->
+          json(conn, 410, %{error: "payment_expired"})
+
+        {:error, reason} when reason in [:invalid_claim_token, :unknown_challenge] ->
+          json(conn, 401, %{error: "invalid_claim"})
+
+        {:error, :rate_limited} ->
+          json(conn, 429, %{error: "rate_limited"})
+
+        {:error, :not_found} ->
+          json(conn, 404, %{error: "not_found"})
+
+        {:error, _reason} ->
+          json(conn, 503, %{error: "payment_status_unavailable"})
       end
     end)
   end
@@ -302,9 +356,9 @@ defmodule ZaptunnelRelay.Router do
         case ZaptunnelRelay.Admission.issue(node_id, address, request_id: request_id) do
           {:error, :connection_limit} = limit ->
             if ZaptunnelRelay.Payments.enabled?() do
-              case ZaptunnelRelay.Payments.challenge(node_id, conn.host) do
+              case ZaptunnelRelay.Payments.challenge(node_id, conn.host, conn.remote_ip) do
                 {:ok, challenge} -> {:payment_required, challenge}
-                {:error, _reason} -> {:error, :billing_unavailable}
+                {:error, reason} -> {:error, reason}
               end
             else
               limit
@@ -324,6 +378,8 @@ defmodule ZaptunnelRelay.Router do
     |> put_resp_header("cache-control", "no-store")
     |> json(402, %{
       amount_sats: challenge.amount_sats,
+      claim_path: challenge.claim_path,
+      claim_token: challenge.claim_token,
       error: "payment_required",
       expires_at: challenge.expires_at,
       invoice: challenge.invoice,
@@ -331,9 +387,15 @@ defmodule ZaptunnelRelay.Router do
       mpp_challenge: challenge.mpp_challenge,
       payment_hash: challenge.payment_hash,
       payment_protocols: challenge.protocols,
-      quote_id: challenge.quote_id
+      quote_id: challenge.quote_id,
+      retry_after_ms: challenge.retry_after_ms
     })
   end
+
+  defp parse_claim_authorization("ZaptunnelClaim " <> token) when byte_size(token) >= 32,
+    do: {:ok, token}
+
+  defp parse_claim_authorization(_authorization), do: {:error, :invalid_claim_token}
 
   defp result_tag({:ok, _ticket}), do: :ok
   defp result_tag({:ok, _ticket, _lease, _receipt}), do: :ok

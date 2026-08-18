@@ -44,6 +44,7 @@ defmodule ZaptunnelRelay.Billing.Commando do
              {:ok, decoded} <- Jason.decode(response) do
           case decoded do
             %{"result" => result} -> {:ok, result}
+            %{"error" => %{"code" => code}} -> {:error, {:commando_rpc_error, code}}
             %{"error" => _error} -> {:error, :commando_rpc_error}
             _invalid -> {:error, :invalid_commando_response}
           end

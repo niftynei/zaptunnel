@@ -69,6 +69,20 @@ unless config_env() == :test do
       String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_LEASE_TTL_MS", "28800000")),
     payment_invoice_timeout_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_INVOICE_TIMEOUT_MS", "10000")),
+    payment_claim_grace_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_GRACE_MS", "60000")),
+    payment_quote_retention_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_QUOTE_RETENTION_MS", "86400000")),
+    payment_max_pending_quotes_per_source:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_MAX_PENDING_QUOTES_PER_SOURCE", "5")),
+    payment_claim_poll_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_POLL_MS", "2000")),
+    payment_watch_timeout_seconds:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_WATCH_TIMEOUT_SECONDS", "30")),
+    payment_watch_retry_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_WATCH_RETRY_MS", "1000")),
+    payment_watch_max_retry_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_WATCH_MAX_RETRY_MS", "30000")),
     payment_token_secret: payment_token_secret || "development-only-zaptunnel-payment-secret",
     payment_state_path: System.get_env("ZAPTUNNEL_PAYMENT_STATE_PATH"),
     billing_node_id: billing_node_id,
