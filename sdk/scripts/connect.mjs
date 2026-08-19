@@ -26,12 +26,7 @@ const ln = new Lnmessage({
   remoteNodePublicKey: nodeId,
   ip: parsedAddress.hostname,
   port: Number(parsedAddress.port),
-  wsProxy: websocketUrl.toString().replace(/\/$/, ""),
-  logger: {
-    info: console.info,
-    warn: console.warn,
-    error: console.error
-  }
+  wsProxy: websocketUrl.toString().replace(/\/$/, "")
 });
 
 try {

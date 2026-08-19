@@ -199,6 +199,8 @@ export type ZaptunnelPaymentOptions = {
 export type ConnectOptions = {
   /** Public Zaptunnel relay origin, for example https://relay.zapptunnel.com. */
   relay?: string;
+  /** Permit plaintext HTTP/WS to a non-loopback relay. Unsafe; intended only for controlled test networks. */
+  allowInsecureRelay?: boolean;
   /** Compressed 33-byte Core Lightning node public key. */
   nodeId: string;
   /** Publicly reachable Lightning peer listener in host:port form. */
@@ -215,6 +217,7 @@ export type ConnectOptions = {
   chainHash?: string;
   /** @deprecated Relay tickets are single-use; use createConnectionManager() instead. */
   reconnect?: boolean;
+  /** Receives only SDK-authored, payload-free lifecycle diagnostics. */
   logger?: ZaptunnelLogger;
   signal?: AbortSignal;
   payment?: ZaptunnelPaymentOptions;
@@ -686,7 +689,6 @@ export class ZaptunnelClient {
   readonly nodeId: string;
   readonly address: string;
   readonly publicKey: string;
-  readonly privateKey: string;
   readonly requestId?: string;
   readonly paymentLease?: string;
   readonly paymentLeaseExpiresAt?: number;
@@ -694,6 +696,7 @@ export class ZaptunnelClient {
   #rune?: string;
   #transport: Lnmessage;
   #disconnectCleanup?: () => void;
+  #privateKey: string;
 
   constructor(
     transport: Lnmessage,
@@ -709,10 +712,15 @@ export class ZaptunnelClient {
     this.nodeId = options.nodeId;
     this.address = options.address;
     this.publicKey = transport.publicKey;
-    this.privateKey = transport.privateKey;
+    this.#privateKey = transport.privateKey;
     this.requestId = requestId;
     this.paymentLease = paymentLease;
     this.paymentLeaseExpiresAt = paymentLeaseExpiresAt;
+  }
+
+  /** Persistent BOLT-8 identity. Treat this value as a secret. */
+  get privateKey(): string {
+    return this.#privateKey;
   }
 
   /** Invoke any CLN JSON-RPC method through Commando. */
@@ -836,7 +844,7 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
   validateNodeId(options.nodeId);
   if (options.chainHash !== undefined) validateChainHash(options.chainHash);
   const { host, port } = parseAddress(options.address);
-  const relay = parseRelay(options.relay ?? DEFAULT_RELAY);
+  const relay = parseRelay(options.relay ?? DEFAULT_RELAY, options.allowInsecureRelay ?? false);
   const admission = await requestAdmission(relay, options, globalThis.fetch);
   const websocketUrl = new URL(admission.websocket_path, relay);
   websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -846,8 +854,7 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     ip: host,
     port,
     wsProxy: websocketUrl.toString().replace(/\/$/, ""),
-    privateKey: options.privateKey,
-    logger: options.logger
+    privateKey: options.privateKey
   });
   const abortConnection = () => transport.disconnect();
   options.signal?.addEventListener("abort", abortConnection, { once: true });
@@ -863,10 +870,10 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
       const BufferConstructor = message.constructor as unknown as {
         from(bytes: Uint8Array): typeof message;
       };
+      if (!transport.socket) throw new Error("the Lightning socket is not available");
+
       const plaintext = BufferConstructor.from(encodeRestrictiveGossipTimestampFilter(chainHash));
       const encrypted = transport.noise.encryptMessage(plaintext);
-
-      if (!transport.socket) throw new Error("the Lightning socket is not available");
       transport.socket.send(encrypted);
     } catch (error) {
       gossipFilterError = error;
@@ -1315,8 +1322,8 @@ export class ZaptunnelConnectionManager {
     try {
       this.#privateKey = await this.#identityStore.loadPrivateKey(this.nodeId);
       this.#savedPrivateKey = this.#privateKey;
-    } catch (error) {
-      this.#options.logger?.warn(`Could not load the persisted Zaptunnel browser identity: ${safeMessage(error)}`);
+    } catch {
+      this.#options.logger?.warn("Could not load the persisted Zaptunnel browser identity");
     }
   }
 
@@ -1326,8 +1333,8 @@ export class ZaptunnelConnectionManager {
     try {
       await this.#identityStore.savePrivateKey(this.nodeId, privateKey);
       this.#savedPrivateKey = privateKey;
-    } catch (error) {
-      this.#options.logger?.warn(`Could not save the Zaptunnel browser identity: ${safeMessage(error)}`);
+    } catch {
+      this.#options.logger?.warn("Could not save the Zaptunnel browser identity");
     }
   }
 
@@ -1352,8 +1359,8 @@ export class ZaptunnelConnectionManager {
   ): void {
     try {
       listener(state);
-    } catch (error) {
-      this.#options.logger?.error(`Zaptunnel connection-state listener failed: ${safeMessage(error)}`);
+    } catch {
+      this.#options.logger?.error("Zaptunnel connection-state listener failed");
     }
   }
 
@@ -1363,8 +1370,8 @@ export class ZaptunnelConnectionManager {
   ): void {
     try {
       listener(status);
-    } catch (error) {
-      this.#options.logger?.error(`Zaptunnel connection-status listener failed: ${safeMessage(error)}`);
+    } catch {
+      this.#options.logger?.error("Zaptunnel connection-status listener failed");
     }
   }
 
@@ -1592,13 +1599,13 @@ async function requestAdmission(
     }
   }
 
-  return parseAdmissionAttempt(attempt);
+  return parseAdmissionAttempt(attempt, relay);
 }
 
 function parseAdmissionAttempt(attempt: {
   response: Response;
   body: Partial<AdmissionResponse> & { error?: string };
-}): AdmissionResponse {
+}, relay: URL): AdmissionResponse {
   const { response, body } = attempt;
   const requestId = body.request_id ?? response.headers.get("x-request-id") ?? undefined;
 
@@ -1611,7 +1618,7 @@ function parseAdmissionAttempt(attempt: {
     });
   }
 
-  if (typeof body.websocket_path !== "string" || !body.websocket_path.startsWith("/")) {
+  if (!validWebsocketPath(body.websocket_path, relay)) {
     throw new ZaptunnelError("the relay returned an invalid admission response", {
       code: "invalid_relay_response",
       status: response.status,
@@ -1625,6 +1632,23 @@ function parseAdmissionAttempt(attempt: {
     lease: typeof body.lease === "string" ? body.lease : undefined,
     lease_expires_at: typeof body.lease_expires_at === "number" ? body.lease_expires_at : undefined
   };
+}
+
+function validWebsocketPath(path: unknown, relay: URL): path is string {
+  if (
+    typeof path !== "string" ||
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    /[\\\u0000-\u0020\u007f]/.test(path)
+  ) {
+    return false;
+  }
+
+  try {
+    return new URL(path, relay).origin === relay.origin;
+  } catch {
+    return false;
+  }
 }
 
 function parsePaymentChallenge(body: {
@@ -1933,7 +1957,7 @@ function linkAbortSignals(
   };
 }
 
-function parseRelay(relay: string): URL {
+function parseRelay(relay: string, allowInsecure: boolean): URL {
   let parsed: URL;
 
   try {
@@ -1947,6 +1971,13 @@ function parseRelay(relay: string): URL {
 
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new ZaptunnelError("relay must be an HTTP or HTTPS origin", { code: "invalid_relay" });
+  }
+
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol !== "https:" && !loopback && !allowInsecure) {
+    throw new ZaptunnelError("relay must use HTTPS outside a loopback development environment", {
+      code: "insecure_relay"
+    });
   }
 
   return parsed;

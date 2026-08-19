@@ -65,6 +65,8 @@
       state = "error";
     } finally {
       client?.disconnect();
+      rune = "";
+      revealRune = false;
     }
   }
 

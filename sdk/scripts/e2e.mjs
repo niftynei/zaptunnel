@@ -1,9 +1,10 @@
 import { createConnectionManager, ZaptunnelRpcError } from "../dist/lib/index.js";
 
-const [relay, nodeId, address, rune] = process.argv.slice(2);
+const [relay, nodeId, address] = process.argv.slice(2);
+const rune = process.env.ZAPTUNNEL_RUNE;
 
 if (!relay || !nodeId || !address || !rune) {
-  console.error("usage: node scripts/e2e.mjs RELAY NODE_ID HOST:PORT RUNE");
+  console.error("usage: ZAPTUNNEL_RUNE=... node scripts/e2e.mjs RELAY NODE_ID HOST:PORT");
   process.exit(2);
 }
 

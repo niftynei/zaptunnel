@@ -181,6 +181,14 @@ It never receives the rune. `localStorage` is convenient but readable by any
 script executing on the same origin, so applications with a stronger threat
 model should provide an encrypted or platform-backed store.
 
+Treat a Commando rune as a bearer credential, even when it is read-only. Prefer
+a narrowly scoped rune with an expiry, keep it in memory for the shortest
+practical time, and provide a clear revoke/replace path. Avoid `localStorage`,
+URLs, analytics, crash reports, and ordinary application logs. If an app must
+survive reloads, encrypt the rune with a non-extractable Web Crypto key stored
+in IndexedDB or retrieve it after user authentication; this reduces at-rest
+exposure but cannot protect a rune from script already executing in the origin.
+
 Calls made through the manager wait for a connection, then execute exactly
 once. The manager deliberately does **not** replay `invoice`, `pay`, or any
 other RPC after an ambiguous connection failure. Application code must decide
@@ -441,7 +449,14 @@ For resilient applications, prefer the manager status API documented above.
 By default every connection receives a new, ephemeral BOLT-8 initiator key. To
 give the browser a stable peer identity, persist `node.privateKey` securely and
 pass it as `privateKey` on the next connection. The key never passes through
-the Zaptunnel relay.
+the Zaptunnel relay. It does not authorize CLN RPCs or control funds, but it is
+a stable identity/linkability secret. Prefer platform-backed or encrypted
+storage; do not serialize the client object or include the key in telemetry.
+
+The optional SDK logger receives only payload-free messages authored by the
+Zaptunnel wrapper. Raw `lnmessage` logs are deliberately suppressed because
+upstream info-level messages can include complete RPC parameters and CLN error
+text.
 
 ## Recommended references
 

@@ -41,6 +41,40 @@ function clientWith(commando, rune = "default-rune") {
   );
 }
 
+test("client private key is not an enumerable own property", () => {
+  const client = clientWith(async () => ({}));
+  assert.equal(client.privateKey, "22".repeat(32));
+  assert.equal(Object.prototype.hasOwnProperty.call(client, "privateKey"), false);
+  assert.equal(Object.keys(client).includes("privateKey"), false);
+});
+
+test("SDK rejects plaintext non-loopback relays", async () => {
+  await assert.rejects(
+    connect({nodeId, address: "node.example.com:9735", relay: "http://relay.example.com"}),
+    (error) => error instanceof ZaptunnelError && error.code === "insecure_relay"
+  );
+});
+
+for (const websocketPath of ["//evil.example/connect", "/\\evil.example/connect", "/v1/connect/\tticket"]) {
+  test(`SDK rejects unsafe relay websocket path ${JSON.stringify(websocketPath)}`, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({websocket_path: websocketPath}), {
+        status: 201,
+        headers: {"content-type": "application/json"}
+      });
+
+    try {
+      await assert.rejects(
+        connect({nodeId, address: "node.example.com:9735"}),
+        (error) => error instanceof ZaptunnelError && error.code === "invalid_relay_response"
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
 class FakeManagedClient {
   constructor({ privateKey = "44".repeat(32), call, invoices = [] } = {}) {
     this.publicKey = "02" + "55".repeat(32);
