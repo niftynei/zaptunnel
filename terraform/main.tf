@@ -46,6 +46,12 @@ variable "nix_channel" {
   description = "NixOS channel used by nixos-infect for the initial bootstrap."
 }
 
+variable "nixos_infect_revision" {
+  type        = string
+  default     = "40f62a680bb0e8f2f607d79abfaaecd99d59401c"
+  description = "Audited nixos-infect Git revision used for the root bootstrap script."
+}
+
 variable "dns_domain" {
   type        = string
   default     = "zapptunnel.com"
@@ -61,7 +67,8 @@ resource "digitalocean_droplet" "zapptunnel" {
   ipv6     = true
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    nix_channel = var.nix_channel
+    nix_channel           = var.nix_channel
+    nixos_infect_revision = var.nixos_infect_revision
   })
 
   lifecycle {

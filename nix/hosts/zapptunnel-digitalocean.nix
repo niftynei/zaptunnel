@@ -164,13 +164,14 @@
       };
 
       "auth.anonymous" = {
-        enabled = true;
-        org_role = "Viewer";
+        enabled = false;
       };
 
-      auth.disable_login_form = true;
+      auth.disable_login_form = false;
       security = {
-        disable_initial_admin_creation = true;
+        admin_user = "admin";
+        admin_password = "$__file{/var/lib/grafana/admin_password}";
+        disable_initial_admin_creation = false;
         secret_key = "$__file{/var/lib/grafana/secret_key}";
       };
       users.default_theme = "dark";
@@ -218,6 +219,9 @@
     umask 077
     if [ ! -s /var/lib/grafana/secret_key ]; then
       ${pkgs.openssl}/bin/openssl rand -hex 32 > /var/lib/grafana/secret_key
+    fi
+    if [ ! -s /var/lib/grafana/admin_password ]; then
+      ${pkgs.openssl}/bin/openssl rand -base64 24 > /var/lib/grafana/admin_password
     fi
   '';
 

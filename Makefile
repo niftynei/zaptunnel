@@ -1,6 +1,6 @@
 # Zaptunnel DigitalOcean provisioning and deployment commands.
-# Run `make help` to list the workflow. Authentication comes from either the
-# DIGITALOCEAN_TOKEN environment variable or the active doctl context.
+# Run `make help` to list the workflow. Infrastructure authentication comes
+# from DIGITALOCEAN_TOKEN or doctl; ACME requires a separate DNS-scoped token.
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -eu -o pipefail -c
@@ -17,17 +17,17 @@ IP = $(shell cd terraform 2>/dev/null && { \
 	command -v jq >/dev/null 2>&1 && jq -er '.outputs.ipv4.value // empty' terraform.tfstate 2>/dev/null || \
 	$(TERRAFORM) output -raw ipv4 2>/dev/null; \
 })
-SSH := ssh -o StrictHostKeyChecking=accept-new
-SCP := scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+SSH := ssh -o StrictHostKeyChecking=yes
+SCP := scp -o StrictHostKeyChecking=yes -o ConnectTimeout=10
 HOST_COPY_ATTEMPTS ?= 12
 SSH_PUBLIC_KEY ?= $(HOME)/.ssh/id_ed25519.pub
 SSH_KEY_FINGERPRINT = $(shell if [ -f "$(SSH_PUBLIC_KEY)" ]; then ssh-keygen -E md5 -lf "$(SSH_PUBLIC_KEY)" | awk '{sub(/^MD5:/, "", $$2); print $$2}'; fi)
 export TF_VAR_ssh_key_fingerprint := $(SSH_KEY_FINGERPRINT)
 
-.PHONY: help check-token check-ip init register-key plan create provision ip \
+.PHONY: help check-token check-dns-token check-ip host-key trust-host init register-key plan create provision ip \
 	wait-for-nixos pull-host-config install-acme-token verify-acme-token deploy \
 	deploy-local-build deploy-dry build-host build check update ssh status \
-	logs acme-logs prometheus-logs grafana-logs alert-logs tor-logs website health ready metrics smoke prometheus grafana alerts dns destroy
+	logs acme-logs prometheus-logs grafana-logs grafana-password alert-logs tor-logs website health ready metrics smoke prometheus grafana alerts dns destroy
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -37,6 +37,13 @@ check-token:
 	@if [ -z "$${DIGITALOCEAN_TOKEN:-}" ]; then \
 		echo "ERROR: no DigitalOcean token found." >&2; \
 		echo "Set DIGITALOCEAN_TOKEN or run 'doctl auth init'." >&2; \
+		exit 1; \
+	fi
+
+check-dns-token:
+	@if [ -z "$${DIGITALOCEAN_DNS_TOKEN:-}" ]; then \
+		echo "ERROR: DIGITALOCEAN_DNS_TOKEN is required for ACME." >&2; \
+		echo "Use a separate token restricted to DNS changes; the full account token is not accepted." >&2; \
 		exit 1; \
 	fi
 
@@ -69,7 +76,9 @@ plan: check-token register-key ## Preview droplet, firewall, and DNS changes.
 create: check-token register-key ## Create the droplet, firewall, and DNS records.
 	cd terraform && $(TERRAFORM) apply
 	@echo
-	@echo "The droplet is converting itself to NixOS. Next run:"
+	@echo "The droplet is converting itself to NixOS. Verify its SSH host key out of band, then run:"
+	@echo "  make host-key"
+	@echo "  EXPECTED_SSH_HOST_KEY_SHA256=SHA256:... make trust-host"
 	@echo "  make wait-for-nixos"
 	@echo "  make pull-host-config"
 	@echo "  make deploy"
@@ -77,6 +86,15 @@ create: check-token register-key ## Create the droplet, firewall, and DNS record
 provision: check-token ## Run the complete first-deployment workflow.
 	@$(MAKE) init
 	@$(MAKE) create
+	@if ! ssh-keygen -F "$(IP)" >/dev/null 2>&1; then \
+		if [ -z "$${EXPECTED_SSH_HOST_KEY_SHA256:-}" ]; then \
+			echo "ERROR: the new host key is not trusted yet." >&2; \
+			echo "Compare 'make host-key' with DigitalOcean, then rerun with:" >&2; \
+			echo "  EXPECTED_SSH_HOST_KEY_SHA256=SHA256:... make provision" >&2; \
+			exit 1; \
+		fi; \
+		$(MAKE) trust-host; \
+	fi
 	@$(MAKE) wait-for-nixos
 	@$(MAKE) pull-host-config
 	@$(MAKE) deploy
@@ -84,6 +102,30 @@ provision: check-token ## Run the complete first-deployment workflow.
 
 ip: check-ip ## Print the droplet IPv4 address.
 	@echo "$(IP)"
+
+host-key: check-ip ## Print the untrusted SSH host-key fingerprint for out-of-band comparison.
+	@ssh-keyscan -t ed25519 "$(IP)" 2>/dev/null | ssh-keygen -lf - -E sha256
+
+trust-host: check-ip ## Trust an SSH host key after matching EXPECTED_SSH_HOST_KEY_SHA256 out of band.
+	@if [ -z "$${EXPECTED_SSH_HOST_KEY_SHA256:-}" ]; then \
+		echo "ERROR: set EXPECTED_SSH_HOST_KEY_SHA256 to the fingerprint verified in the DigitalOcean console." >&2; \
+		exit 1; \
+	fi; \
+	temporary=$$(mktemp); \
+	trap 'rm -f "$$temporary"' EXIT; \
+	ssh-keyscan -t ed25519 "$(IP)" 2>/dev/null >"$$temporary"; \
+	actual=$$(ssh-keygen -lf "$$temporary" -E sha256 | awk '{print $$2}'); \
+	if [ "$$actual" != "$${EXPECTED_SSH_HOST_KEY_SHA256}" ]; then \
+		echo "ERROR: SSH host-key mismatch: expected $${EXPECTED_SSH_HOST_KEY_SHA256}, got $$actual." >&2; \
+		exit 1; \
+	fi; \
+	mkdir -p "$(HOME)/.ssh"; \
+	touch "$(HOME)/.ssh/known_hosts"; \
+	chmod 0700 "$(HOME)/.ssh"; \
+	chmod 0600 "$(HOME)/.ssh/known_hosts"; \
+	ssh-keygen -R "$(IP)" -f "$(HOME)/.ssh/known_hosts" >/dev/null 2>&1 || true; \
+	cat "$$temporary" >>"$(HOME)/.ssh/known_hosts"; \
+	echo "Trusted verified SSH host key for $(IP)."
 
 wait-for-nixos: check-ip ## Wait until nixos-infect finishes and the droplet reboots.
 	@echo "Waiting for NixOS on $(IP)..."
@@ -122,17 +164,16 @@ pull-host-config: check-ip ## Pull the droplet's generated hardware and network 
 		echo "No generated networking.nix found; retaining DHCP configuration."; \
 	fi
 
-install-acme-token: check-token check-ip ## Install the DigitalOcean DNS token used by ACME.
-	@TOKEN="$${DIGITALOCEAN_DNS_TOKEN:-$${DIGITALOCEAN_TOKEN}}"; \
-	printf '%s\n' "$$TOKEN" | $(SSH) root@$(IP) \
+install-acme-token: check-dns-token check-ip ## Install the DNS-scoped DigitalOcean token used by ACME.
+	@printf '%s\n' "$${DIGITALOCEAN_DNS_TOKEN}" | $(SSH) root@$(IP) \
 		'install -d -m 0700 -o root -g root /var/lib/zapptunnel-secrets && \
 		 install -m 0400 -o root -g root /dev/stdin /var/lib/zapptunnel-secrets/digitalocean-dns-token'
 	@echo "Installed the ACME DNS token outside the Nix store."
 
 verify-acme-token: check-ip ## Verify that the installed token can read the DO domain list.
 	@$(SSH) root@$(IP) 'token=$$(tr -d "\r\n" </var/lib/zapptunnel-secrets/digitalocean-dns-token); \
-		curl --fail --silent --show-error \
-		-H "Authorization: Bearer $$token" https://api.digitalocean.com/v2/domains >/dev/null'
+		printf '\''header = "Authorization: Bearer %s"\n'\'' "$$token" | \
+		curl --config - --fail --silent --show-error https://api.digitalocean.com/v2/domains >/dev/null'
 	@echo "The installed DigitalOcean token is valid."
 
 deploy: check-ip ## Install secrets, build on the droplet, and activate Zaptunnel.
@@ -189,6 +230,9 @@ prometheus-logs: check-ip ## Follow Prometheus logs.
 grafana-logs: check-ip ## Follow Grafana logs.
 	$(SSH) root@$(IP) 'journalctl -u grafana.service -f'
 
+grafana-password: check-ip ## Print the generated Grafana admin password.
+	$(SSH) root@$(IP) 'cat /var/lib/grafana/admin_password'
+
 alert-logs: check-ip ## Follow firing and resolved Alertmanager notifications.
 	$(SSH) root@$(IP) 'journalctl -u alertmanager-webhook-logger.service -f'
 
@@ -207,17 +251,17 @@ website: ## Check the public documentation and demo site.
 	curl --fail --silent --show-error https://zapptunnel.com/ | grep -Fq '<title>Zaptunnel — your node, from anywhere</title>'
 	@echo "Zaptunnel website is available."
 
-metrics: ## Print the public Prometheus exposition from the relay.
-	curl --fail --silent --show-error https://relay.zapptunnel.com/metrics
+metrics: check-ip ## Print private Prometheus exposition over SSH.
+	$(SSH) root@$(IP) 'curl --fail --silent --show-error --resolve relay.zapptunnel.com:443:127.0.0.1 https://relay.zapptunnel.com/metrics'
 
 smoke: ## Wait for DNS/ACME, then verify HTTPS health and Prometheus exposition.
 	@for attempt in $$(seq 1 60); do \
 		if curl --fail --silent https://zapptunnel.com/ 2>/dev/null | \
 			grep -Fq '<title>Zaptunnel — your node, from anywhere</title>' && \
 			curl --fail --silent https://relay.zapptunnel.com/readyz >/dev/null 2>&1 && \
-			curl --fail --silent https://relay.zapptunnel.com/metrics 2>/dev/null | \
+			$(SSH) root@$(IP) 'curl --fail --silent --resolve relay.zapptunnel.com:443:127.0.0.1 https://relay.zapptunnel.com/metrics' 2>/dev/null | \
 			grep -q '^zaptunnel_sessions'; then \
-			echo "Zaptunnel website, HTTPS relay, and metrics smoke checks passed."; \
+			echo "Zaptunnel website, HTTPS relay, and private metrics smoke checks passed."; \
 			exit 0; \
 		fi; \
 		echo "  smoke attempt $$attempt/60 failed; retrying in 5 seconds"; \

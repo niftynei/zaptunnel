@@ -59,6 +59,24 @@ groups:
           summary: Admission rate limiting is elevated
           description: The relay rejected more than 50 admission requests in five minutes.
 
+      - alert: ZaptunnelAdmissionOverloaded
+        expr: increase(zaptunnel_admission_requests_total{job="zapptunnel",result="relay_overloaded"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Relay admission capacity was exhausted
+          description: At least one request reached the global session or endpoint-verification ceiling.
+
+      - alert: ZaptunnelDestinationSlotPressure
+        expr: increase(zaptunnel_admission_requests_total{job="zapptunnel",result=~"connection_limit|pending_limit"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Destination connection limits are being hit repeatedly
+          description: Repeated free-slot or pending-ticket rejection may indicate targeted slot claiming.
+
       - alert: ZaptunnelPaymentWatcherErrors
         expr: increase(zaptunnel_payment_watcher_errors_total{job="zapptunnel"}[5m]) > 2
         for: 2m

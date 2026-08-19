@@ -23,7 +23,7 @@ The current vertical slice includes:
 - request rate limiting and bounded frames;
 - opaque, bidirectional WebSocket-to-TCP forwarding;
 - a typed, importable TypeScript SDK built on `lnmessage`;
-- Prometheus metrics at `/metrics`; and
+- loopback-only Prometheus metrics at `/metrics`; and
 - a reproducible OTP release and NixOS module.
 
 ## Development
@@ -124,7 +124,8 @@ nix build .#relay
 nix build .#sdk
 ```
 
-Prometheus can scrape `GET /metrics` on the relay listener. Metrics cover
+Prometheus can scrape `GET /metrics` from loopback on the relay listener. The
+public endpoint deliberately returns `404`. Metrics cover
 admission outcomes, rate limiting, endpoint verification, pending and active
 sessions, payment challenges, claims, billing settlements, watcher failures,
 settlement delay, duration, and forwarded byte counts. Node IDs are deliberately

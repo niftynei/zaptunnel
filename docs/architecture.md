@@ -109,7 +109,8 @@ sessions continue until they close or the configured drain deadline expires.
 The NixOS service gives the application additional stop time beyond that
 deadline before systemd terminates it.
 
-The relay serves Prometheus text exposition at `/metrics`. It reports
+The relay serves Prometheus text exposition at `/metrics` only to loopback
+clients. It reports
 aggregate admission outcomes, rate-limit rejections, endpoint verification
 results and duration, pending and active slots, session lifecycle, and byte
 counts. Node IDs and addresses are never Prometheus labels: they would leak
@@ -129,10 +130,12 @@ operational blocking rather than trying to make the free tier unavailable to
 untrusted callers.
 
 A session consumes a slot while it is pending or active. Slot acquisition and
-release must be atomic so simultaneous requests cannot exceed the limit. A
-slot is released when either side disconnects, establishment times out, or the
-session process terminates. Pending sessions have a short handshake timeout so
-an incomplete WebSocket or BOLT-8 connection cannot hold a slot indefinitely.
+release are atomic so simultaneous requests cannot exceed the limit. Only one
+unclaimed free ticket may exist per destination at a time. A slot is released
+when its short-lived ticket expires, either side disconnects, or the session
+process terminates. Because the relay cannot distinguish an inner BOLT-8
+handshake from other encrypted bytes, it enforces byte and idle limits rather
+than claiming to enforce a BOLT-8 establishment deadline.
 
 When all free slots are occupied, a payment-enabled relay returns
 `payment_required` with one BOLT11 invoice represented through both MPP and
@@ -156,10 +159,10 @@ for that destination and can be exhausted by callers who know its node ID and
 address. At minimum, the relay must:
 
 - rate-limit session creation separately from concurrent sessions;
-- apply strict WebSocket and BOLT-8 establishment deadlines;
+- expire unclaimed WebSocket tickets promptly and apply session idle limits;
 - close sessions that never exchange traffic after establishment;
 - cap pending sessions independently from active sessions; and
-- emit per-destination occupancy and rejection metrics.
+- emit aggregate occupancy and rejection metrics without destination labels.
 
 Long-lived, healthy Lightning sessions should not be disconnected merely to
 rotate free capacity.

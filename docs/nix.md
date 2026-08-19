@@ -112,10 +112,10 @@ configure `tls.certificateFile` and `tls.privateKeyFile`. Keep TLS keys, DNS
 credentials, and other secrets outside the Nix store and provide application
 secrets through `environmentFile` or a NixOS secret-management system.
 
-Prometheus should scrape `https://<relay>/metrics`. The endpoint is served by
-Bandit on the same listener as admission and WebSocket traffic, so it requires
-no additional firewall port. Aggregate metrics contain no node-ID or address
-labels.
+Prometheus should scrape `https://<relay>/metrics` from loopback. The endpoint
+is served by Bandit on the same listener as admission and WebSocket traffic but
+returns `404` to non-loopback peers. Aggregate metrics contain no node-ID or
+address labels.
 
 ## DigitalOcean host
 
@@ -129,6 +129,7 @@ The root `Makefile` wraps OpenTofu/Terraform, `doctl`, SSH, and
 
 ```console
 doctl auth init
+export DIGITALOCEAN_DNS_TOKEN=<restricted-dns-token>
 make provision
 ```
 
@@ -137,14 +138,18 @@ already has that public key under another name, provisioning reuses it instead
 of attempting a duplicate import. Set `SSH_PUBLIC_KEY=/path/to/key.pub` to use
 a different deployment key.
 
+Before the first SSH connection, compare `make host-key` with the fingerprint
+shown in the DigitalOcean console, then run `make trust-host` with
+`EXPECTED_SSH_HOST_KEY_SHA256` set to that verified value. All later SSH and
+SCP commands require the saved key to match.
+
 `make provision` registers the deployment SSH key when needed, creates the
 droplet, firewall, and DNS records, waits for `nixos-infect`, pulls the exact
-hardware/network configuration, installs the DigitalOcean token for ACME,
+hardware/network configuration, installs the DNS-scoped DigitalOcean token for ACME,
 deploys the NixOS system, and runs public HTTPS smoke checks.
 
-By default ACME receives the active deployment token. Set
-`DIGITALOCEAN_DNS_TOKEN` before deployment to install a separate, restricted
-DNS token instead.
+ACME requires `DIGITALOCEAN_DNS_TOKEN`; it never falls back to the full
+infrastructure token. Use a separate token restricted to DNS access.
 
 The domain must use DigitalOcean DNS. To inspect or run individual stages:
 
@@ -188,9 +193,9 @@ Open the Grafana SSH tunnel with:
 make grafana
 ```
 
-Then visit `http://127.0.0.1:3000`. Access is anonymous and read-only because
-the service is reachable only through an authenticated SSH connection. For the
-raw Prometheus query UI, use:
+Then visit `http://127.0.0.1:3000`, sign in as `admin`, and retrieve the
+generated password with `make grafana-password`. For the raw Prometheus query
+UI, use:
 
 ```console
 make prometheus

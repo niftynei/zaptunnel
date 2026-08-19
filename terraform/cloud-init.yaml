@@ -2,4 +2,4 @@
 # Convert the initial Ubuntu image to NixOS, following the same workflow used
 # by the adjacent streamer deployment.
 runcmd:
-  - curl https://raw.githubusercontent.com/elitak/nixos-infect/master/nixos-infect | PROVIDER=digitalocean NIX_CHANNEL=${nix_channel} bash 2>&1 | tee /tmp/infect.log
+  - curl --fail --show-error --silent --location https://raw.githubusercontent.com/elitak/nixos-infect/${nixos_infect_revision}/nixos-infect | PROVIDER=digitalocean NIX_CHANNEL=${nix_channel} bash 2>&1 | tee /tmp/infect.log
