@@ -13,18 +13,25 @@ defmodule ZaptunnelRelay.AdmissionTest do
 
   test "limits a node to three pending or active sessions" do
     assert {:ok, first} = Admission.issue(@node_id, @address)
-    assert {:ok, _second} = Admission.issue(@node_id, @address)
+    first_owner = spawn(fn -> Process.sleep(:infinity) end)
+    assert {:ok, _target} = Admission.claim(first, first_owner)
+
+    assert {:ok, second} = Admission.issue(@node_id, @address)
+    second_owner = spawn(fn -> Process.sleep(:infinity) end)
+    assert {:ok, _target} = Admission.claim(second, second_owner)
+
     assert {:ok, _third} = Admission.issue(@node_id, @address)
     assert {:error, :connection_limit} = Admission.issue(@node_id, @address)
 
-    owner = spawn(fn -> Process.sleep(:infinity) end)
-
-    assert {:ok, %{node_id: @node_id, address: @address, request_id: nil}} =
-             Admission.claim(first, owner)
-
-    Process.exit(owner, :kill)
+    Process.exit(first_owner, :kill)
 
     eventually(fn -> match?({:ok, _ticket}, Admission.issue(@node_id, @address)) end)
+    Process.exit(second_owner, :kill)
+  end
+
+  test "allows only one unclaimed ticket per node" do
+    assert {:ok, _ticket} = Admission.issue(@node_id, @address)
+    assert {:error, :pending_limit} = Admission.issue(@node_id, @address)
   end
 
   test "carries the admission request id into the claimed session" do
@@ -43,11 +50,8 @@ defmodule ZaptunnelRelay.AdmissionTest do
   end
 
   test "expired tickets release their slot" do
-    for _index <- 1..3 do
-      assert {:ok, _ticket} = Admission.issue(@node_id, @address)
-    end
-
-    assert {:error, :connection_limit} = Admission.issue(@node_id, @address)
+    assert {:ok, _ticket} = Admission.issue(@node_id, @address)
+    assert {:error, :pending_limit} = Admission.issue(@node_id, @address)
     eventually(fn -> match?({:ok, _ticket}, Admission.issue(@node_id, @address)) end)
   end
 
@@ -64,7 +68,13 @@ defmodule ZaptunnelRelay.AdmissionTest do
   end
 
   test "a paid lease bypasses the free-node limit but cannot be used concurrently" do
-    for _index <- 1..3, do: assert({:ok, _ticket} = Admission.issue(@node_id, @address))
+    free_owners =
+      for _index <- 1..3 do
+        assert {:ok, ticket} = Admission.issue(@node_id, @address)
+        owner = spawn(fn -> Process.sleep(:infinity) end)
+        assert {:ok, _target} = Admission.claim(ticket, owner)
+        owner
+      end
 
     assert {:ok, paid_ticket} =
              Admission.issue(@node_id, @address, paid_lease: "zl_paid")
@@ -79,6 +89,8 @@ defmodule ZaptunnelRelay.AdmissionTest do
     eventually(fn ->
       match?({:ok, _ticket}, Admission.issue(@node_id, @address, paid_lease: "zl_paid"))
     end)
+
+    Enum.each(free_owners, &Process.exit(&1, :kill))
   end
 
   test "draining rejects new admissions while preserving existing tickets and sessions" do

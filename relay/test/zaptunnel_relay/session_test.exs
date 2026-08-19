@@ -49,7 +49,7 @@ defmodule ZaptunnelRelay.SessionTest do
 
     log =
       capture_log(fn ->
-        assert {:stop, :normal} =
+        assert {:stop, :normal, %{dial_error: :econnrefused}} =
                  Session.init(%{
                    address: {{127, 0, 0, 1}, port},
                    node_id: @node_id,

@@ -56,5 +56,13 @@ defmodule ZaptunnelRelay.Bolt8Test do
     assert {:error, :authentication_failed} = Bolt8.finish_act2(state, bad_act2)
   end
 
+  test "validates compressed public keys as curve points" do
+    assert Bolt8.valid_public_key?(
+             decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+           )
+
+    refute Bolt8.valid_public_key?(decode("02" <> String.duplicate("ff", 32)))
+  end
+
   defp decode(hex), do: Base.decode16!(hex, case: :mixed)
 end

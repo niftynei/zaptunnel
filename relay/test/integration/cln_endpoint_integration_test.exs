@@ -98,13 +98,16 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
     end
 
     assert {:ok, output} =
-             command("node", [
-               script,
-               "http://127.0.0.1:#{relay_port}",
-               node_id,
-               "#{@onion}:9735",
-               rune
-             ])
+             command(
+               "node",
+               [
+                 script,
+                 "http://127.0.0.1:#{relay_port}",
+                 node_id,
+                 "#{@onion}:9735"
+               ],
+               env: [{"ZAPTUNNEL_RUNE", rune}]
+             )
 
     assert %{
              "nodeId" => ^node_id,
@@ -295,7 +298,11 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
   defp lightning_cli_args(directory), do: ["--network=regtest", "--lightning-dir=#{directory}"]
 
   defp command(executable, args, opts \\ []) do
-    {output, status} = System.cmd(executable, args, stderr_to_stdout: true)
+    {output, status} =
+      System.cmd(executable, args,
+        stderr_to_stdout: true,
+        env: Keyword.get(opts, :env, [])
+      )
 
     cond do
       status == 0 -> {:ok, output}

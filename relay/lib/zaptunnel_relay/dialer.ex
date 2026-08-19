@@ -1,8 +1,6 @@
 defmodule ZaptunnelRelay.Dialer do
   @moduledoc false
 
-  @tcp_options [:binary, active: false, packet: :raw, nodelay: true]
-
   @type target :: ZaptunnelRelay.Address.target()
 
   @spec connect(target(), keyword()) :: {:ok, port()} | {:error, atom()}
@@ -13,8 +11,7 @@ defmodule ZaptunnelRelay.Dialer do
 
     case target do
       {ip, port} when is_tuple(ip) ->
-        tcp_options = [:binary, active: active, packet: :raw, nodelay: true]
-        :gen_tcp.connect(ip, port, tcp_options, remaining(deadline))
+        :gen_tcp.connect(ip, port, tcp_options(active), remaining(deadline))
 
       {:onion, host, port} ->
         connect_onion(host, port, active, deadline, Keyword.get(opts, :proxy, tor_proxy()))
@@ -25,7 +22,7 @@ defmodule ZaptunnelRelay.Dialer do
 
   defp connect_onion(host, port, active, deadline, {proxy_ip, proxy_port}) do
     with {:ok, socket} <-
-           :gen_tcp.connect(proxy_ip, proxy_port, @tcp_options, remaining(deadline)) do
+           :gen_tcp.connect(proxy_ip, proxy_port, tcp_options(false), remaining(deadline)) do
       case negotiate_socks(socket, host, port, deadline) do
         :ok ->
           case :inet.setopts(socket, active: active) do
@@ -101,6 +98,19 @@ defmodule ZaptunnelRelay.Dialer do
   defp socks_reply(_reply), do: {:error, :tor_protocol_error}
 
   defp tor_proxy, do: Application.get_env(:zaptunnel_relay, :tor_socks_proxy)
+
+  defp tcp_options(active) do
+    send_timeout = Application.fetch_env!(:zaptunnel_relay, :tcp_send_timeout_ms)
+
+    [
+      :binary,
+      active: active,
+      packet: :raw,
+      nodelay: true,
+      send_timeout: send_timeout,
+      send_timeout_close: true
+    ]
+  end
 
   defp close_error(socket, reason) do
     :gen_tcp.close(socket)

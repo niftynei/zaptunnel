@@ -90,7 +90,11 @@ unless config_env() == :test do
     billing_node_rune: billing_node_rune,
     max_total_sessions:
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_TOTAL_SESSIONS", "10000")),
+    max_pending_sessions_per_node:
+      String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_SESSIONS_PER_NODE", "1")),
     connect_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_CONNECT_TIMEOUT_MS", "5000")),
+    tcp_send_timeout_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_TCP_SEND_TIMEOUT_MS", "5000")),
     dns_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_DNS_TIMEOUT_MS", "2000")),
     verification_timeout_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_VERIFICATION_TIMEOUT_MS", "5000")),
@@ -100,11 +104,35 @@ unless config_env() == :test do
       String.to_integer(System.get_env("ZAPTUNNEL_VERIFICATION_FAILURE_TTL_MS", "15000")),
     max_pending_verifications:
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_VERIFICATIONS", "128")),
+    max_pending_verifications_per_source:
+      String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_VERIFICATIONS_PER_SOURCE", "8")),
+    max_verification_waiters_per_endpoint:
+      String.to_integer(System.get_env("ZAPTUNNEL_MAX_VERIFICATION_WAITERS_PER_ENDPOINT", "16")),
+    verification_cache_sweep_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_VERIFICATION_CACHE_SWEEP_MS", "60000")),
+    verification_cache_max_size:
+      String.to_integer(System.get_env("ZAPTUNNEL_VERIFICATION_CACHE_MAX_SIZE", "10000")),
     rate_limit_burst: String.to_integer(System.get_env("ZAPTUNNEL_RATE_LIMIT_BURST", "5")),
     rate_limit_refill_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_RATE_LIMIT_REFILL_MS", "1000")),
+    global_rate_limit_burst:
+      String.to_integer(System.get_env("ZAPTUNNEL_GLOBAL_RATE_LIMIT_BURST", "32")),
+    global_rate_limit_refill_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_GLOBAL_RATE_LIMIT_REFILL_MS", "100")),
+    payment_claim_rate_limit_burst:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_RATE_LIMIT_BURST", "10")),
+    payment_claim_rate_limit_refill_ms:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_RATE_LIMIT_REFILL_MS", "500")),
+    payment_claim_global_rate_limit_burst:
+      String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_GLOBAL_RATE_LIMIT_BURST", "256")),
+    payment_claim_global_rate_limit_refill_ms:
+      String.to_integer(
+        System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_GLOBAL_RATE_LIMIT_REFILL_MS", "10")
+      ),
+    rate_limit_max_buckets:
+      String.to_integer(System.get_env("ZAPTUNNEL_RATE_LIMIT_MAX_BUCKETS", "10000")),
     max_websocket_frame_bytes:
-      String.to_integer(System.get_env("ZAPTUNNEL_MAX_WEBSOCKET_FRAME_BYTES", "65569")),
+      String.to_integer(System.get_env("ZAPTUNNEL_MAX_WEBSOCKET_FRAME_BYTES", "65583")),
     session_idle_timeout_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_SESSION_IDLE_TIMEOUT_MS", "300000")),
     drain_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_DRAIN_TIMEOUT_MS", "30000")),

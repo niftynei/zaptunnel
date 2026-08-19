@@ -105,15 +105,31 @@ defmodule ZaptunnelRelay.Bolt8 do
   end
 
   def receive_message(socket, %Transport{} = transport, timeout) do
-    with {:ok, encrypted_length} <- :gen_tcp.recv(socket, 18, timeout),
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    with {:ok, encrypted_length} <- :gen_tcp.recv(socket, 18, remaining(deadline)),
          {:ok, <<length::16>>, transport} <- decrypt_transport(encrypted_length, transport),
-         {:ok, encrypted_message} <- :gen_tcp.recv(socket, length + 16, timeout),
+         {:ok, encrypted_message} <- :gen_tcp.recv(socket, length + 16, remaining(deadline)),
          {:ok, message, transport} <- decrypt_transport(encrypted_message, transport) do
       {:ok, message, transport}
     else
       {:error, reason} -> {:error, reason}
     end
   end
+
+  def valid_public_key?(<<prefix, _rest::binary-size(32)>> = public_key)
+      when prefix in [2, 3] do
+    private_key = <<0::248, 1>>
+
+    case Secp256k1.ecdh(private_key, public_key) do
+      shared_secret when is_binary(shared_secret) -> true
+      _invalid -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  def valid_public_key?(_public_key), do: false
 
   defp encrypt_transport(plaintext, %Transport{} = transport) do
     ciphertext = encrypt(transport.send_key, transport.send_nonce, <<>>, plaintext)
@@ -214,4 +230,7 @@ defmodule ZaptunnelRelay.Bolt8 do
       {:error, _reason} -> private_key()
     end
   end
+
+  defp remaining(deadline),
+    do: max(deadline - System.monotonic_time(:millisecond), 1)
 end

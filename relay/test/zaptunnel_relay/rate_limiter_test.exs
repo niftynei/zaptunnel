@@ -4,13 +4,23 @@ defmodule ZaptunnelRelay.RateLimiterTest do
   alias ZaptunnelRelay.RateLimiter
 
   setup do
-    burst = Application.fetch_env!(:zaptunnel_relay, :rate_limit_burst)
-    refill = Application.fetch_env!(:zaptunnel_relay, :rate_limit_refill_ms)
+    previous =
+      for key <- [
+            :rate_limit_burst,
+            :rate_limit_refill_ms,
+            :global_rate_limit_burst,
+            :global_rate_limit_refill_ms,
+            :rate_limit_max_buckets
+          ],
+          into: %{} do
+        {key, Application.fetch_env!(:zaptunnel_relay, key)}
+      end
+
     RateLimiter.reset()
 
     on_exit(fn ->
-      Application.put_env(:zaptunnel_relay, :rate_limit_burst, burst)
-      Application.put_env(:zaptunnel_relay, :rate_limit_refill_ms, refill)
+      Enum.each(previous, fn {key, value} -> Application.put_env(:zaptunnel_relay, key, value) end)
+
       RateLimiter.reset()
     end)
 
@@ -28,5 +38,33 @@ defmodule ZaptunnelRelay.RateLimiterTest do
 
     Process.sleep(25)
     assert :ok = RateLimiter.check({192, 0, 2, 1})
+  end
+
+  test "groups IPv6 sources by /64" do
+    Application.put_env(:zaptunnel_relay, :rate_limit_burst, 1)
+    Application.put_env(:zaptunnel_relay, :rate_limit_refill_ms, 60_000)
+
+    assert :ok = RateLimiter.check({0x2001, 0xDB8, 1, 2, 1, 2, 3, 4})
+
+    assert {:error, :rate_limited} =
+             RateLimiter.check({0x2001, 0xDB8, 1, 2, 9, 8, 7, 6})
+
+    assert :ok = RateLimiter.check({0x2001, 0xDB8, 1, 3, 1, 2, 3, 4})
+  end
+
+  test "enforces a relay-wide ceiling across source addresses" do
+    Application.put_env(:zaptunnel_relay, :global_rate_limit_burst, 2)
+    Application.put_env(:zaptunnel_relay, :global_rate_limit_refill_ms, 60_000)
+
+    assert :ok = RateLimiter.check({192, 0, 2, 1})
+    assert :ok = RateLimiter.check({192, 0, 2, 2})
+    assert {:error, :rate_limited} = RateLimiter.check({192, 0, 2, 3})
+  end
+
+  test "bounds the number of remembered source buckets" do
+    Application.put_env(:zaptunnel_relay, :rate_limit_max_buckets, 1)
+
+    assert :ok = RateLimiter.check({192, 0, 2, 1})
+    assert {:error, :rate_limited} = RateLimiter.check({192, 0, 2, 2})
   end
 end

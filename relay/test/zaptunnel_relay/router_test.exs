@@ -26,7 +26,7 @@ defmodule ZaptunnelRelay.RouterTest do
     def create_invoice(_opts), do: Application.fetch_env!(:zaptunnel_relay, :router_test_invoice)
   end
 
-  @node_id "02" <> String.duplicate("11", 32)
+  @node_id "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
   setup do
     previous = Application.fetch_env!(:zaptunnel_relay, :endpoint_probe_module)
@@ -137,6 +137,82 @@ defmodule ZaptunnelRelay.RouterTest do
     assert log =~ "stage=input reason=invalid_node_id"
     assert log =~ ~s(submitted_address="bad-address\\nforged=true")
     refute log =~ "\nforged=true"
+  end
+
+  test "rejects a compressed-key encoding that is not a secp256k1 point" do
+    conn =
+      :post
+      |> conn(
+        "/v1/connections",
+        Jason.encode!(%{node_id: "02" <> String.duplicate("ff", 32), address: "127.0.0.1:9735"})
+      )
+      |> put_req_header("content-type", "application/json")
+      |> Router.call([])
+
+    assert conn.status == 400
+    assert %{"error" => "invalid_connection_request"} = Jason.decode!(conn.resp_body)
+    refute_receive {:probe, _, _}
+  end
+
+  test "rate limits admission before parsing a large body" do
+    previous_burst = Application.fetch_env!(:zaptunnel_relay, :rate_limit_burst)
+    previous_refill = Application.fetch_env!(:zaptunnel_relay, :rate_limit_refill_ms)
+    Application.put_env(:zaptunnel_relay, :rate_limit_burst, 1)
+    Application.put_env(:zaptunnel_relay, :rate_limit_refill_ms, 60_000)
+    RateLimiter.reset()
+
+    on_exit(fn ->
+      Application.put_env(:zaptunnel_relay, :rate_limit_burst, previous_burst)
+      Application.put_env(:zaptunnel_relay, :rate_limit_refill_ms, previous_refill)
+      RateLimiter.reset()
+    end)
+
+    assert post_connection().status == 201
+
+    response =
+      :post
+      |> conn("/v1/connections", String.duplicate("x", 20_000))
+      |> put_req_header("content-type", "application/json")
+      |> Router.call([])
+
+    assert response.status == 429
+    assert %{"error" => "rate_limited"} = Jason.decode!(response.resp_body)
+  end
+
+  test "supports the advertised websocket path without a trailing target" do
+    response = Router.call(conn(:get, "/v1/connect/not-a-ticket"), [])
+    assert response.status == 401
+  end
+
+  test "does not parse bodies on unrelated routes" do
+    response = Router.call(conn(:put, "/not-found", String.duplicate("x", 20_000)), [])
+    assert response.status == 404
+  end
+
+  test "caps admission request bodies" do
+    request =
+      :post
+      |> conn("/v1/connections", String.duplicate("x", 20_000))
+      |> put_req_header("content-type", "application/json")
+
+    assert_raise Plug.Parsers.RequestTooLargeError, fn -> Router.call(request, []) end
+  end
+
+  test "serves metrics only to loopback peers" do
+    response = Router.call(%{conn(:get, "/metrics") | remote_ip: {203, 0, 113, 1}}, [])
+    assert response.status == 404
+  end
+
+  test "adds HSTS when the listener is configured for TLS" do
+    previous_tls = Application.fetch_env!(:zaptunnel_relay, :tls)
+    Application.put_env(:zaptunnel_relay, :tls, %{certfile: "test", keyfile: "test"})
+    on_exit(fn -> Application.put_env(:zaptunnel_relay, :tls, previous_tls) end)
+
+    response = Router.call(conn(:get, "/healthz"), [])
+
+    assert get_resp_header(response, "strict-transport-security") == [
+             "max-age=31536000; includeSubDomains"
+           ]
   end
 
   test "separates the website, relay, and unknown hosts" do

@@ -38,7 +38,7 @@ defmodule ZaptunnelRelay.Session do
             "target=#{format_address(target)}"
         )
 
-        {:stop, :normal}
+        {:stop, :normal, %{dial_error: reason}}
     end
   end
 
@@ -110,8 +110,13 @@ defmodule ZaptunnelRelay.Session do
   defp format_request_id("zt_" <> rest = request_id) when byte_size(rest) == 16, do: request_id
   defp format_request_id(_request_id), do: "internal"
 
-  defp abbreviate(<<prefix::binary-size(8), _middle::binary-size(50), suffix::binary-size(8)>>),
-    do: prefix <> "…" <> suffix
+  defp abbreviate(
+         <<prefix::binary-size(8), _middle::binary-size(50), suffix::binary-size(8)>> = node_id
+       ) do
+    if String.match?(node_id, ~r/\A(?:02|03)[0-9a-fA-F]{64}\z/),
+      do: prefix <> "…" <> suffix,
+      else: "invalid"
+  end
 
   defp abbreviate(_node_id), do: "invalid"
 

@@ -518,8 +518,13 @@ defmodule ZaptunnelRelay.Payments do
   defp random_id(prefix),
     do: prefix <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
 
-  defp abbreviate(<<prefix::binary-size(8), _::binary-size(50), suffix::binary-size(8)>>),
-    do: prefix <> "…" <> suffix
+  defp abbreviate(
+         <<prefix::binary-size(8), _::binary-size(50), suffix::binary-size(8)>> = node_id
+       ) do
+    if String.match?(node_id, ~r/\A(?:02|03)[0-9a-fA-F]{64}\z/),
+      do: prefix <> "…" <> suffix,
+      else: "invalid"
+  end
 
   defp safe_reason(reason) when is_atom(reason), do: reason
   defp safe_reason(_reason), do: :billing_unavailable

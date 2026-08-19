@@ -10,7 +10,7 @@ defmodule ZaptunnelRelay.RelayIntegrationTest do
     def verify(_node_id, _address), do: :ok
   end
 
-  @node_id "02" <> String.duplicate("11", 32)
+  @node_id "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
   setup do
     previous_probe = Application.fetch_env!(:zaptunnel_relay, :endpoint_probe_module)

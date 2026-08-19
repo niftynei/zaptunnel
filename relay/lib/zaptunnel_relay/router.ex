@@ -10,19 +10,21 @@ defmodule ZaptunnelRelay.Router do
                  gzip: true,
                  only: ~w(assets favicon.svg)
                )
+  @json_parser_opts Plug.Parsers.init(
+                      parsers: [:json],
+                      pass: ["application/json"],
+                      json_decoder: Jason,
+                      length: 16_384
+                    )
 
   plug(:request_id)
   plug(:surface)
   plug(:static)
   plug(:cors)
+  plug(:security_headers)
   plug(:match)
-
-  plug(Plug.Parsers,
-    parsers: [:json],
-    pass: ["application/json"],
-    json_decoder: Jason
-  )
-
+  plug(:limit_admission)
+  plug(:parse_admission_body)
   plug(:dispatch)
 
   options "/*path" do
@@ -52,9 +54,13 @@ defmodule ZaptunnelRelay.Router do
 
   get "/metrics" do
     relay_only(conn, fn conn ->
-      conn
-      |> put_resp_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-      |> send_resp(200, ZaptunnelRelay.Metrics.render())
+      if loopback_peer?(conn) do
+        conn
+        |> put_resp_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+        |> send_resp(200, ZaptunnelRelay.Metrics.render())
+      else
+        json(conn, 404, %{error: "not_found"})
+      end
     end)
   end
 
@@ -65,14 +71,14 @@ defmodule ZaptunnelRelay.Router do
 
     relay_only(conn, fn conn ->
       result =
-        with :ok <- ZaptunnelRelay.RateLimiter.check(conn.remote_ip),
-             :ok <- ZaptunnelRelay.Admission.check_ready(),
+        with :ok <- ZaptunnelRelay.Admission.check_ready(),
              {:ok, node_id} <- validate_node_id(submitted_node_id),
              {:ok, parsed} <- ZaptunnelRelay.Address.parse(submitted_address),
              {:ok, pinned_address} <- resolve(parsed),
              :ok <-
                ZaptunnelRelay.EndpointVerifier.verify(node_id, pinned_address,
-                 request_id: request_id
+                 request_id: request_id,
+                 source: conn.remote_ip
                ),
              result <- admit(conn, node_id, pinned_address, request_id) do
           result
@@ -105,6 +111,9 @@ defmodule ZaptunnelRelay.Router do
 
         {:error, :connection_limit} ->
           json(conn, 429, %{error: "connection_limit"})
+
+        {:error, :pending_limit} ->
+          json(conn, 429, %{error: "pending_limit"})
 
         {:error, :lease_in_use} ->
           json(conn, 409, %{error: "lease_in_use"})
@@ -161,7 +170,7 @@ defmodule ZaptunnelRelay.Router do
 
       result =
         with true <- ZaptunnelRelay.Payments.enabled?(),
-             :ok <- ZaptunnelRelay.RateLimiter.check(conn.remote_ip),
+             :ok <- ZaptunnelRelay.RateLimiter.check(conn.remote_ip, :payment_claim),
              {:ok, token} <- claim_token do
           ZaptunnelRelay.Payments.claim(quote_id, token)
         else
@@ -202,23 +211,14 @@ defmodule ZaptunnelRelay.Router do
     end)
   end
 
-  get "/v1/connect/:ticket/*requested_target" do
-    relay_only(conn, fn conn ->
-      with [_target] <- requested_target,
-           {:ok, target} <- ZaptunnelRelay.Admission.claim(ticket) do
-        WebSockAdapter.upgrade(conn, ZaptunnelRelay.Session, target,
-          timeout: Application.fetch_env!(:zaptunnel_relay, :session_idle_timeout_ms),
-          max_frame_size: Application.fetch_env!(:zaptunnel_relay, :max_websocket_frame_bytes)
-        )
-      else
-        _error ->
-          Logger.warning(
-            "session ticket rejected request_id=#{conn.assigns.zaptunnel_request_id} reason=invalid_ticket"
-          )
+  get "/v1/connect/:ticket" do
+    upgrade_session(conn, ticket)
+  end
 
-          json(conn, 401, %{error: "invalid_ticket"})
-      end
-    end)
+  get "/v1/connect/:ticket/*requested_target" do
+    if length(requested_target) <= 1,
+      do: upgrade_session(conn, ticket),
+      else: json(conn, 404, %{error: "not_found"})
   end
 
   match _ do
@@ -237,6 +237,48 @@ defmodule ZaptunnelRelay.Router do
       "payment-receipt,www-authenticate,x-request-id"
     )
     |> put_resp_header("access-control-allow-methods", "GET,POST,OPTIONS")
+  end
+
+  defp security_headers(conn, _opts) do
+    conn = put_resp_header(conn, "x-content-type-options", "nosniff")
+
+    if Application.get_env(:zaptunnel_relay, :tls, false) == false do
+      conn
+    else
+      put_resp_header(conn, "strict-transport-security", "max-age=31536000; includeSubDomains")
+    end
+  end
+
+  defp limit_admission(%{method: "POST", path_info: ["v1", "connections"]} = conn, _opts) do
+    case ZaptunnelRelay.RateLimiter.check(conn.remote_ip) do
+      :ok -> conn
+      {:error, :rate_limited} -> conn |> json(429, %{error: "rate_limited"}) |> halt()
+    end
+  end
+
+  defp limit_admission(conn, _opts), do: conn
+
+  defp parse_admission_body(%{method: "POST", path_info: ["v1", "connections"]} = conn, _opts),
+    do: Plug.Parsers.call(conn, @json_parser_opts)
+
+  defp parse_admission_body(conn, _opts), do: conn
+
+  defp upgrade_session(conn, ticket) do
+    relay_only(conn, fn conn ->
+      with {:ok, target} <- ZaptunnelRelay.Admission.claim(ticket) do
+        WebSockAdapter.upgrade(conn, ZaptunnelRelay.Session, target,
+          timeout: Application.fetch_env!(:zaptunnel_relay, :session_idle_timeout_ms),
+          max_frame_size: Application.fetch_env!(:zaptunnel_relay, :max_websocket_frame_bytes)
+        )
+      else
+        _error ->
+          Logger.warning(
+            "session ticket rejected request_id=#{conn.assigns.zaptunnel_request_id} reason=invalid_ticket"
+          )
+
+          json(conn, 401, %{error: "invalid_ticket"})
+      end
+    end)
   end
 
   defp request_id(conn, _opts) do
@@ -306,14 +348,22 @@ defmodule ZaptunnelRelay.Router do
 
   defp loopback_request?(%{host: host, remote_ip: remote_ip}) do
     host in ["127.0.0.1", "localhost", "::1"] and
-      remote_ip in [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}]
+      loopback_ip?(remote_ip)
   end
 
-  defp validate_node_id(<<prefix::binary-size(2), rest::binary-size(64)>> = node_id)
+  defp loopback_peer?(%{remote_ip: remote_ip}), do: loopback_ip?(remote_ip)
+  defp loopback_ip?(ip), do: ip in [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}]
+
+  defp validate_node_id(<<prefix::binary-size(2), _rest::binary-size(64)>> = node_id)
        when prefix in ["02", "03"] do
-    case Base.decode16(rest, case: :mixed) do
-      {:ok, _bytes} -> {:ok, String.downcase(node_id)}
-      :error -> {:error, :invalid_node_id}
+    case Base.decode16(node_id, case: :mixed) do
+      {:ok, public_key} ->
+        if ZaptunnelRelay.Bolt8.valid_public_key?(public_key),
+          do: {:ok, String.downcase(node_id)},
+          else: {:error, :invalid_node_id}
+
+      :error ->
+        {:error, :invalid_node_id}
     end
   end
 
@@ -433,6 +483,7 @@ defmodule ZaptunnelRelay.Router do
 
   defp admission_stage(:rate_limited), do: :rate_limit
   defp admission_stage(:connection_limit), do: :quota
+  defp admission_stage(:pending_limit), do: :quota
   defp admission_stage(:relay_overloaded), do: :capacity
   defp admission_stage(:relay_draining), do: :lifecycle
   defp admission_stage(:endpoint_unverified), do: :verification
@@ -448,8 +499,13 @@ defmodule ZaptunnelRelay.Router do
   defp safe_reason(reason) when is_atom(reason), do: reason
   defp safe_reason(_reason), do: :error
 
-  defp abbreviate_node_id(<<prefix::binary-size(8), _::binary-size(50), suffix::binary-size(8)>>),
-    do: prefix <> "…" <> suffix
+  defp abbreviate_node_id(node_id) when is_binary(node_id) do
+    if String.match?(node_id, ~r/\A(?:02|03)[0-9a-fA-F]{64}\z/) do
+      String.slice(node_id, 0, 8) <> "…" <> String.slice(node_id, -8, 8)
+    else
+      "invalid"
+    end
+  end
 
   defp abbreviate_node_id(_node_id), do: "invalid"
 

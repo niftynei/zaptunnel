@@ -45,6 +45,7 @@ defmodule ZaptunnelRelay.Admission do
        tickets: %{},
        active: %{},
        counts: %{},
+       pending_counts: %{},
        paid_leases: MapSet.new(),
        total: 0,
        draining: false
@@ -68,6 +69,11 @@ defmodule ZaptunnelRelay.Admission do
             Application.fetch_env!(:zaptunnel_relay, :free_sessions_per_node) ->
         {:reply, {:error, :connection_limit}, state}
 
+      is_nil(paid_lease) and
+          Map.get(state.pending_counts, node_id, 0) >=
+            Application.fetch_env!(:zaptunnel_relay, :max_pending_sessions_per_node) ->
+        {:reply, {:error, :pending_limit}, state}
+
       true ->
         ticket = :crypto.strong_rand_bytes(24) |> Base.url_encode64(padding: false)
         ttl = Application.fetch_env!(:zaptunnel_relay, :ticket_ttl_ms)
@@ -85,6 +91,7 @@ defmodule ZaptunnelRelay.Admission do
           state
           | tickets: Map.put(state.tickets, ticket, entry),
             counts: Map.update(state.counts, node_id, 1, &(&1 + 1)),
+            pending_counts: Map.update(state.pending_counts, node_id, 1, &(&1 + 1)),
             paid_leases: add_paid_lease(state.paid_leases, paid_lease),
             total: state.total + 1
         }
@@ -102,6 +109,7 @@ defmodule ZaptunnelRelay.Admission do
        tickets: %{},
        active: %{},
        counts: %{},
+       pending_counts: %{},
        paid_leases: MapSet.new(),
        total: 0,
        draining: false
@@ -140,7 +148,12 @@ defmodule ZaptunnelRelay.Admission do
         active = Map.put(state.active, ref, Map.take(entry, [:node_id, :paid_lease]))
 
         {:reply, {:ok, Map.take(entry, [:node_id, :address, :request_id])},
-         %{state | tickets: tickets, active: active}}
+         %{
+           state
+           | tickets: tickets,
+             active: active,
+             pending_counts: decrement(state.pending_counts, entry.node_id)
+         }}
     end
   end
 
@@ -156,6 +169,7 @@ defmodule ZaptunnelRelay.Admission do
            state
            | tickets: tickets,
              counts: decrement(state.counts, node_id),
+             pending_counts: decrement(state.pending_counts, node_id),
              paid_leases: remove_paid_lease(state.paid_leases, paid_lease),
              total: state.total - 1
          }}

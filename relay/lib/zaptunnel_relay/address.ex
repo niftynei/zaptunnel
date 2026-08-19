@@ -129,6 +129,7 @@ defmodule ZaptunnelRelay.Address do
   defp public?({first, _, _, _, _, _, _, _}) when first in 0xFE80..0xFEBF, do: false
   defp public?({first, _, _, _, _, _, _, _}) when first in 0xFEC0..0xFEFF, do: false
   defp public?({first, _, _, _, _, _, _, _}) when first in 0xFF00..0xFFFF, do: false
+  defp public?({0x2620, 0x4F, 0x8000, _, _, _, _, _}), do: false
   defp public?({_a, _b, _c, _d}), do: true
   defp public?({_a, _b, _c, _d, _e, _f, _g, _h}), do: true
 

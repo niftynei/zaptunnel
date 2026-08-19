@@ -37,11 +37,17 @@ defmodule ZaptunnelRelay.AddressTest do
           "[3ffe::1]:9735",
           "[3fff::1]:9735",
           "[5f00::1]:9735",
-          "[fec0::1]:9735"
+          "[fec0::1]:9735",
+          "[2620:4f:8000::1]:9735"
         ] do
       assert {:ok, parsed} = Address.parse(address)
       assert {:error, :non_public_address} = Address.resolve(parsed)
     end
+  end
+
+  test "does not over-block the public neighbor of the AS112 range" do
+    assert {:ok, parsed} = Address.parse("[2620:4f:8001::1]:9735")
+    assert {:ok, {_ip, 9_735}} = Address.resolve(parsed)
   end
 
   test "does not over-block neighboring public IPv4 ranges" do
