@@ -3,6 +3,7 @@ packages:
 
 allowBuilds:
   esbuild: true
+  "lnmessage@https://codeload.github.com/niftynei/lnmessage/tar.gz/d64920905ffe3639c4f05e532758d2ad0ffb0143": true
 
 onlyBuiltDependencies:
   - esbuild

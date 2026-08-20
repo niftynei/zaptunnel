@@ -59,7 +59,7 @@
           inherit (finalAttrs) pname version src;
           pnpm = pkgs.pnpm;
           fetcherVersion = 4;
-          hash = "sha256-bQgLceyJT+SZ6iL+QieLxWppKgXlALAxWDp6s+e83Vs=";
+          hash = "sha256-U0AlXrK/40jASt5sGhT9X64iQmtTsPejhzsyJj+ZuZg=";
         };
 
         nativeBuildInputs = [pkgs.nodejs pkgs.pnpm pkgs.pnpmConfigHook];

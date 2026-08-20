@@ -36,7 +36,7 @@
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "lnmessage": "0.2.9"
+    "lnmessage": "github:niftynei/lnmessage#d64920905ffe3639c4f05e532758d2ad0ffb0143"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",

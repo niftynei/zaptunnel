@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       lnmessage:
-        specifier: 0.2.9
-        version: 0.2.9
+        specifier: github:niftynei/lnmessage#d64920905ffe3639c4f05e532758d2ad0ffb0143
+        version: https://codeload.github.com/niftynei/lnmessage/tar.gz/d64920905ffe3639c4f05e532758d2ad0ffb0143
     devDependencies:
       '@sveltejs/vite-plugin-svelte':
         specifier: ^7.3.0
@@ -446,8 +446,9 @@ packages:
   is-reference@3.0.3:
     resolution: {integrity: sha512-ixkJoqQvAP88E6wLydLGGqCJsrFUnqoH6HnaczB8XmDH1oaWU+xxdptvikTgaEhtZ53Ky6YXiBuUI2WXLMCwjw==}
 
-  lnmessage@0.2.9:
-    resolution: {integrity: sha512-6wM19/5mXN3hicbXC305hHYmJ9Tu/BbGkn7+96fEjwcX8r+mITF1xx76K5c+c3xbKTGVckwXu1mzaDMyLBblFg==}
+  lnmessage@https://codeload.github.com/niftynei/lnmessage/tar.gz/d64920905ffe3639c4f05e532758d2ad0ffb0143:
+    resolution: {gitHosted: true, integrity: sha512-zaBLOEmzZNFcMrtvboOqxcX07/qv5py2nE+M+SB4RSO/wz/kb68nGrPZR/cGMcas1X9b78qC7nUoiGIKrCKsMA==, tarball: https://codeload.github.com/niftynei/lnmessage/tar.gz/d64920905ffe3639c4f05e532758d2ad0ffb0143}
+    version: 0.2.9
 
   locate-character@3.0.0:
     resolution: {integrity: sha512-SW13ws7BjaeJ6p7Q6CO2nchbYEc3X3J6WrmTTDto7yMPqVSZTUyY5Tjbid+Ab8gLnATtygYtiDIJGQRRn2ZOiA==}
@@ -860,7 +861,7 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.9
 
-  lnmessage@0.2.9:
+  lnmessage@https://codeload.github.com/niftynei/lnmessage/tar.gz/d64920905ffe3639c4f05e532758d2ad0ffb0143:
     dependencies:
       '@noble/hashes': 1.8.0
       '@noble/secp256k1': 2.3.0
