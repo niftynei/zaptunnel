@@ -183,6 +183,20 @@ test("troubleshooting diagnostics map stable errors to actionable stages", () =>
   assert.ok(diagnostic.suggestions.some((item) => item.includes("node ID")));
 });
 
+test("troubleshooting diagnostics classify authenticated transport failures", () => {
+  const diagnostic = diagnoseZaptunnelError(
+    new ZaptunnelError("ciphertext failed authenticated decryption", {
+      code: "transport_integrity_failure",
+      requestId: "zt_transport_123456"
+    })
+  );
+
+  assert.equal(diagnostic.code, "transport_integrity_failure");
+  assert.equal(diagnostic.stage, "lightning_transport");
+  assert.equal(diagnostic.retryable, true);
+  assert.equal(diagnostic.requestId, "zt_transport_123456");
+});
+
 test("troubleshooting diagnostics preserve the underlying error after retries exhaust", () => {
   const underlying = new ZaptunnelError("relay could not reach the node", {
     code: "endpoint_unverified",
@@ -405,6 +419,36 @@ test("connection status is exposed without leaking lnmessage internals", () => {
   assert.deepEqual(statuses, ["connected"]);
   assert.equal(typeof unsubscribe, "function");
   unsubscribe();
+});
+
+test("client maps lnmessage decrypt failures to a stable SDK error", () => {
+  let emitTransportError;
+  const client = new ZaptunnelClient(
+    {
+      publicKey: "02" + "11".repeat(32),
+      privateKey: "22".repeat(32),
+      connectionErrors$: {
+        subscribe(listener) {
+          emitTransportError = listener;
+          return { unsubscribe() {} };
+        }
+      },
+      connectionStatus$: {
+        subscribe() {
+          return { unsubscribe() {} };
+        }
+      },
+      commando: async () => ({}),
+      disconnect() {}
+    },
+    { nodeId, address: "node.example.com:9735", rune: "readonly" },
+    undefined,
+    "zt_transport_123456"
+  );
+
+  emitTransportError({ code: "decrypt_failure", message: "raw upstream detail" });
+  assert.equal(client.lastTransportError.code, "transport_integrity_failure");
+  assert.equal(client.lastTransportError.requestId, "zt_transport_123456");
 });
 
 test("relay admission failures carry their correlation request id", async () => {

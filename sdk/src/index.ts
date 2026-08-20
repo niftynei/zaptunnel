@@ -101,6 +101,7 @@ export type ZaptunnelFailureStage =
   | "relay_admission"
   | "endpoint_verification"
   | "lightning_handshake"
+  | "lightning_transport"
   | "authorization"
   | "rpc"
   | "lifecycle"
@@ -490,6 +491,13 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Check CLN availability and let the connection manager create a fresh session."]
   },
+  transport_integrity_failure: {
+    stage: "lightning_transport",
+    title: "Encrypted Lightning transport failed integrity validation",
+    summary: "A received Lightning frame failed authenticated decryption and the session was closed.",
+    retryable: true,
+    suggestions: ["Retry with a fresh session. If it repeats, report the relay request ID and inspect relay/network integrity."]
+  },
   connection_failed: {
     stage: "lightning_handshake",
     title: "Lightning connection failed",
@@ -697,6 +705,7 @@ export class ZaptunnelClient {
   #transport: Lnmessage;
   #disconnectCleanup?: () => void;
   #privateKey: string;
+  #lastTransportError?: ZaptunnelError;
 
   constructor(
     transport: Lnmessage,
@@ -708,7 +717,13 @@ export class ZaptunnelClient {
   ) {
     this.#transport = transport;
     this.#rune = options.rune;
-    this.#disconnectCleanup = disconnectCleanup;
+    const transportErrors = transport.connectionErrors$?.subscribe((error) => {
+      this.#lastTransportError = normalizeTransportError(error, requestId);
+    });
+    this.#disconnectCleanup = () => {
+      transportErrors?.unsubscribe();
+      disconnectCleanup?.();
+    };
     this.nodeId = options.nodeId;
     this.address = options.address;
     this.publicKey = transport.publicKey;
@@ -721,6 +736,11 @@ export class ZaptunnelClient {
   /** Persistent BOLT-8 identity. Treat this value as a secret. */
   get privateKey(): string {
     return this.#privateKey;
+  }
+
+  /** Most recent fatal authenticated-transport error, if one occurred. */
+  get lastTransportError(): ZaptunnelError | undefined {
+    return this.#lastTransportError;
   }
 
   /** Invoke any CLN JSON-RPC method through Commando. */
@@ -856,6 +876,11 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     wsProxy: websocketUrl.toString().replace(/\/$/, ""),
     privateKey: options.privateKey
   });
+  let initialTransportError: ZaptunnelError | undefined;
+  const transportErrorSubscription = transport.connectionErrors$.subscribe((error) => {
+    initialTransportError = normalizeTransportError(error, admission.request_id);
+  });
+  let transportErrorSubscriptionTransferred = false;
   const abortConnection = () => transport.disconnect();
   options.signal?.addEventListener("abort", abortConnection, { once: true });
 
@@ -895,10 +920,13 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     const connected = await transport.connect(false);
 
     if (!connected) {
-      throw new ZaptunnelError("the Lightning connection closed during its BOLT-8 handshake", {
-        code: "connection_closed",
-        requestId: admission.request_id
-      });
+      throw (
+        initialTransportError ??
+        new ZaptunnelError("the Lightning connection closed during its BOLT-8 handshake", {
+          code: "connection_closed",
+          requestId: admission.request_id
+        })
+      );
     }
 
     if (gossipFilterError) {
@@ -909,16 +937,22 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
       });
     }
 
-    return new ZaptunnelClient(
+    const client = new ZaptunnelClient(
       transport,
       options,
-      () => gossipSubscription.unsubscribe(),
+      () => {
+        transportErrorSubscription.unsubscribe();
+        gossipSubscription.unsubscribe();
+      },
       admission.request_id,
       admission.lease,
       admission.lease_expires_at
     );
+    transportErrorSubscriptionTransferred = true;
+    return client;
   } catch (error) {
     gossipSubscription.unsubscribe();
+    if (!transportErrorSubscriptionTransferred) transportErrorSubscription.unsubscribe();
     transport.disconnect();
 
     if (error instanceof ZaptunnelError) throw error;
@@ -1234,10 +1268,12 @@ export class ZaptunnelConnectionManager {
 
   #handleConnectionLoss(client: ZaptunnelClient): void {
     if (client !== this.#client || this.#stopped) return;
-    this.#lastError = new ZaptunnelError("the active Lightning connection closed", {
-      code: "connection_closed",
-      requestId: client.requestId
-    });
+    this.#lastError =
+      client.lastTransportError ??
+      new ZaptunnelError("the active Lightning connection closed", {
+        code: "connection_closed",
+        requestId: client.requestId
+      });
     this.#dropClient();
     this.#attempts = 0;
     this.#setStatus("waiting_reconnect");
@@ -2134,6 +2170,23 @@ async function controlRpcOperation<T>(
 
 function requestControlError(method: string, code: string, message: string): ZaptunnelRpcError {
   return new ZaptunnelRpcError(message, { code, method });
+}
+
+function normalizeTransportError(
+  error: { code?: string; message?: string } | unknown,
+  requestId?: string
+): ZaptunnelError {
+  const transportCode = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  const message =
+    transportCode === "decrypt_failure"
+      ? "received Lightning ciphertext failed authenticated decryption"
+      : "the Lightning transport reported a fatal protocol error";
+
+  return new ZaptunnelError(message, {
+    code: transportCode === "decrypt_failure" ? "transport_integrity_failure" : "connection_failed",
+    requestId,
+    cause: error
+  });
 }
 
 function normalizeRpcError(method: string, error: unknown): ZaptunnelError {
