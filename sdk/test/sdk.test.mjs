@@ -227,6 +227,15 @@ test("troubleshooting diagnostics safely handle unknown errors", () => {
   assert.equal(diagnostic.summary.includes("internal detail"), false);
 });
 
+for (const code of ["__proto__", "constructor", "toString"]) {
+  test(`troubleshooting diagnostics safely handle prototype key ${code}`, () => {
+    const diagnostic = diagnoseZaptunnelError(new ZaptunnelError("hostile relay error", { code }));
+    assert.equal(diagnostic.code, code);
+    assert.equal(diagnostic.stage, "unknown");
+    assert.equal(diagnostic.retryable, false);
+  });
+}
+
 test("manager exposes retry timing and diagnostic state", async () => {
   const manager = new FakeConnectionManager(
     managedOptions({ retry: { minDelayMs: 1_000, maxDelayMs: 1_000, jitter: 0 } }),
@@ -366,6 +375,22 @@ test("finite retry exhaustion is stable and can be retried explicitly", async ()
   manager.stop();
 });
 
+test("manager does not retry a permanent admission failure", async () => {
+  const manager = new FakeConnectionManager(managedOptions(), [
+    new ZaptunnelError("invalid request", { code: "invalid_address" }),
+    new FakeManagedClient()
+  ]);
+
+  await assert.rejects(
+    manager.start(),
+    (error) => error instanceof ZaptunnelError && error.code === "invalid_address"
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(manager.receivedOptions.length, 1);
+  assert.equal(manager.status, "failed");
+  manager.stop();
+});
+
 test("manager validates retry policy before starting network work", () => {
   assert.throws(
     () => new FakeConnectionManager(managedOptions({ retry: { maxAttempts: 0 } }), []),
@@ -449,6 +474,100 @@ test("client maps lnmessage decrypt failures to a stable SDK error", () => {
   emitTransportError({ code: "decrypt_failure", message: "raw upstream detail" });
   assert.equal(client.lastTransportError.code, "transport_integrity_failure");
   assert.equal(client.lastTransportError.requestId, "zt_transport_123456");
+});
+
+test("transport failure rejects an in-flight RPC", async () => {
+  let emitTransportError;
+  const client = new ZaptunnelClient(
+    {
+      publicKey: "02" + "11".repeat(32),
+      privateKey: "22".repeat(32),
+      connectionErrors$: {
+        subscribe(listener) {
+          emitTransportError = listener;
+          return { unsubscribe() {} };
+        }
+      },
+      connectionStatus$: {
+        subscribe(listener) {
+          listener("connected");
+          return { unsubscribe() {} };
+        }
+      },
+      commando: async () => await new Promise(() => {}),
+      disconnect() {}
+    },
+    { nodeId, address: "node.example.com:9735", rune: "readonly" }
+  );
+
+  const pending = client.getinfo();
+  emitTransportError({ code: "decrypt_failure" });
+  await assert.rejects(
+    pending,
+    (error) => error instanceof ZaptunnelError && error.code === "transport_integrity_failure"
+  );
+});
+
+test("oversized partial Commando responses close the transport", () => {
+  let emitMessage;
+  let disconnected = false;
+  const client = new ZaptunnelClient(
+    {
+      publicKey: "02" + "11".repeat(32),
+      privateKey: "22".repeat(32),
+      connectionStatus$: {
+        subscribe(listener) {
+          listener("connected");
+          return { unsubscribe() {} };
+        }
+      },
+      decryptedMsgs$: {
+        subscribe(listener) {
+          emitMessage = listener;
+          return { unsubscribe() {} };
+        }
+      },
+      commando: async () => ({}),
+      disconnect() {
+        disconnected = true;
+      }
+    },
+    { nodeId, address: "node.example.com:9735", rune: "readonly" }
+  );
+
+  const message = new Uint8Array(1_048_577);
+  new DataView(message.buffer).setUint16(0, 22_859);
+  emitMessage(message);
+  assert.equal(disconnected, true);
+  assert.equal(client.lastTransportError.code, "transport_resource_limit");
+});
+
+test("BOLT-8 establishment has a local deadline", async () => {
+  const originalFetch = globalThis.fetch;
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ websocket_path: "/v1/connect/never-opens" }), {
+      status: 201,
+      headers: { "content-type": "application/json" }
+    });
+  globalThis.WebSocket = class {
+    binaryType = "arraybuffer";
+    close() {}
+  };
+
+  try {
+    await assert.rejects(
+      connect({
+        nodeId,
+        address: "node.example.com:9735",
+        connectionTimeoutMs: 1
+      }),
+      (error) => error instanceof ZaptunnelError && error.code === "connection_timeout"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.WebSocket = OriginalWebSocket;
+  }
 });
 
 test("relay admission failures carry their correlation request id", async () => {

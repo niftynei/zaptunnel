@@ -5,7 +5,7 @@ export type RpcParams = unknown[] | Record<string, unknown>;
 export type RpcCallOptions = {
   /** Override the client's default rune for this call. */
   rune?: string;
-  /** Reject locally if the request has not completed within this many milliseconds. */
+  /** Reject locally if the request has not completed within this many milliseconds. Defaults to 30 seconds. */
   timeoutMs?: number;
   /** Reject locally when the signal is aborted. */
   signal?: AbortSignal;
@@ -55,7 +55,7 @@ export type PaidInvoice = {
 export type WaitAnyInvoiceOptions = RpcCallOptions & {
   /** Ignore paid invoices at or below this monotonically increasing CLN index. */
   lastPayIndex?: number;
-  /** Ask CLN to end the long poll after this many seconds. Omit to wait indefinitely. */
+  /** Ask CLN to end the long poll after this many seconds. Defaults to 30 seconds. */
   waitTimeoutSeconds?: number;
 };
 
@@ -64,6 +64,8 @@ export type PaidInvoiceStreamOptions = Omit<WaitAnyInvoiceOptions, "timeoutMs" |
   waitTimeoutSeconds?: number;
   /** Local grace period after CLN's long-poll timeout. Defaults to 5 seconds. */
   timeoutGraceMs?: number;
+  /** Minimum pause after a fast CLN timeout response. Defaults to 250 ms. */
+  retryDelayMs?: number;
 };
 
 export const DEFAULT_RELAY = "https://relay.zapptunnel.com";
@@ -72,8 +74,14 @@ export const BITCOIN_MAINNET_CHAIN_HASH =
 
 const INIT_MESSAGE_TYPE = 16;
 const GOSSIP_TIMESTAMP_FILTER_MESSAGE_TYPE = 265;
+const COMMANDO_RESPONSE_CONTINUES_MESSAGE_TYPE = 22_859;
+const COMMANDO_RESPONSE_MESSAGE_TYPE = 22_861;
 const NO_GOSSIP_FIRST_TIMESTAMP = 0xffff_ffff;
 const NO_GOSSIP_TIMESTAMP_RANGE = 0;
+const DEFAULT_CONNECTION_TIMEOUT_MS = 15_000;
+const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+const MAX_PARTIAL_COMMANDO_RESPONSES = 128;
+const MAX_PARTIAL_COMMANDO_BYTES = 1_048_576;
 
 export type ZaptunnelLogger = {
   info(message: string): void;
@@ -221,6 +229,8 @@ export type ConnectOptions = {
   /** Receives only SDK-authored, payload-free lifecycle diagnostics. */
   logger?: ZaptunnelLogger;
   signal?: AbortSignal;
+  /** Local deadline for WebSocket and BOLT-8 establishment. Defaults to 15 seconds. */
+  connectionTimeoutMs?: number;
   payment?: ZaptunnelPaymentOptions;
   /** A previously purchased reconnect-safe lease returned by Zaptunnel. */
   paymentLease?: string;
@@ -375,6 +385,13 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Close an unused session or wait for one to disconnect before retrying."]
   },
+  pending_limit: {
+    stage: "relay_admission",
+    title: "Connection ticket already pending",
+    summary: "The destination already has the configured number of unclaimed connection tickets.",
+    retryable: true,
+    suggestions: ["Retry after the short admission-ticket lifetime or claim the ticket already issued."]
+  },
   payment_required: {
     stage: "relay_admission",
     title: "Connection payment required",
@@ -424,12 +441,26 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Keep the claim secret and retry after the relay billing connection recovers."]
   },
+  billing_unavailable: {
+    stage: "relay_admission",
+    title: "Relay billing unavailable",
+    summary: "The relay could not reach or safely use its billing service.",
+    retryable: true,
+    suggestions: ["Keep any payment claim and retry after the relay recovers."]
+  },
   invalid_lease: {
     stage: "relay_admission",
     title: "Connection lease invalid",
     summary: "The paid connection lease is invalid, expired, or belongs to another node.",
     retryable: true,
     suggestions: ["Remove the stale lease and request a new connection payment challenge."]
+  },
+  lease_node_mismatch: {
+    stage: "authorization",
+    title: "Connection lease belongs to another node",
+    summary: "The supplied paid lease is not valid for this destination node.",
+    retryable: false,
+    suggestions: ["Use the lease only with the node for which it was purchased."]
   },
   unsupported_payment_protocol: {
     stage: "relay_admission",
@@ -466,6 +497,41 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Use a Tor-capable relay or provide the node's clearnet address."]
   },
+  non_public_address: {
+    stage: "relay_admission",
+    title: "Private destination refused",
+    summary: "The public relay does not connect to private, loopback, or otherwise restricted addresses.",
+    retryable: false,
+    suggestions: ["Provide the node's publicly reachable clearnet address or v3 onion service."]
+  },
+  invalid_connection_request: {
+    stage: "relay_admission",
+    title: "Invalid connection request",
+    summary: "The relay rejected the supplied node ID, address, or request shape.",
+    retryable: false,
+    suggestions: ["Validate the node ID and host:port address before retrying."]
+  },
+  misdirected_request: {
+    stage: "relay_admission",
+    title: "Wrong relay host",
+    summary: "The request reached a host name that this service does not handle.",
+    retryable: false,
+    suggestions: ["Use the configured relay origin rather than the website or server IP."]
+  },
+  not_found: {
+    stage: "relay_admission",
+    title: "Relay endpoint not found",
+    summary: "The selected server does not expose the requested Zaptunnel endpoint.",
+    retryable: false,
+    suggestions: ["Check the relay URL and SDK/relay version compatibility."]
+  },
+  website_not_packaged: {
+    stage: "relay_admission",
+    title: "Relay website unavailable",
+    summary: "This relay build does not contain the packaged website assets.",
+    retryable: false,
+    suggestions: ["Use the relay API directly or deploy a release containing the website bundle."]
+  },
   invalid_ticket: {
     stage: "relay_admission",
     title: "Expired relay ticket",
@@ -491,12 +557,26 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Check CLN availability and let the connection manager create a fresh session."]
   },
+  connection_timeout: {
+    stage: "lightning_handshake",
+    title: "Lightning connection timed out",
+    summary: "The WebSocket or BOLT-8 handshake did not complete before the local deadline.",
+    retryable: true,
+    suggestions: ["Check the peer and relay, then retry with a fresh admission ticket."]
+  },
   transport_integrity_failure: {
     stage: "lightning_transport",
     title: "Encrypted Lightning transport failed integrity validation",
     summary: "A received Lightning frame failed authenticated decryption and the session was closed.",
     retryable: true,
     suggestions: ["Retry with a fresh session. If it repeats, report the relay request ID and inspect relay/network integrity."]
+  },
+  transport_resource_limit: {
+    stage: "lightning_transport",
+    title: "Lightning transport response limit exceeded",
+    summary: "The peer sent too many or too-large partial Commando responses, so the SDK closed the session.",
+    retryable: false,
+    suggestions: ["Inspect the destination node or plugin before reconnecting."]
   },
   connection_failed: {
     stage: "lightning_handshake",
@@ -618,8 +698,8 @@ export function diagnoseZaptunnelError(error: unknown): ZaptunnelTroubleshooting
   const chain = zaptunnelErrorChain(error);
   const primary = chain[0];
   const underlying = chain.find((item) => item.code !== "reconnect_exhausted") ?? primary;
-  const primaryDefinition = primary ? TROUBLESHOOTING[primary.code] : undefined;
-  const underlyingDefinition = underlying ? TROUBLESHOOTING[underlying.code] : undefined;
+  const primaryDefinition = troubleshootingDefinition(primary?.code);
+  const underlyingDefinition = troubleshootingDefinition(underlying?.code);
   const definition = primaryDefinition ?? underlyingDefinition ?? UNKNOWN_TROUBLESHOOTING;
   const suggestions = [
     ...definition.suggestions,
@@ -638,6 +718,12 @@ export function diagnoseZaptunnelError(error: unknown): ZaptunnelTroubleshooting
     requestId: chain.find((item) => item.requestId)?.requestId,
     suggestions: Object.freeze(suggestions)
   };
+}
+
+function troubleshootingDefinition(code: unknown): TroubleshootingDefinition | undefined {
+  return typeof code === "string" && Object.hasOwn(TROUBLESHOOTING, code)
+    ? TROUBLESHOOTING[code]
+    : undefined;
 }
 
 function zaptunnelErrorChain(error: unknown): ZaptunnelError[] {
@@ -706,6 +792,9 @@ export class ZaptunnelClient {
   #disconnectCleanup?: () => void;
   #privateKey: string;
   #lastTransportError?: ZaptunnelError;
+  #transportAbort = new AbortController();
+  #partialCommandoBytes = new Map<string, number>();
+  #partialCommandoTotalBytes = 0;
 
   constructor(
     transport: Lnmessage,
@@ -719,9 +808,18 @@ export class ZaptunnelClient {
     this.#rune = options.rune;
     const transportErrors = transport.connectionErrors$?.subscribe((error) => {
       this.#lastTransportError = normalizeTransportError(error, requestId);
+      this.#transportAbort.abort();
+    });
+    const transportStatus = transport.connectionStatus$?.subscribe((status) => {
+      if (status === "disconnected" || status === "failed") this.#transportAbort.abort();
+    });
+    const decryptedMessages = transport.decryptedMsgs$?.subscribe((message) => {
+      this.#trackPartialCommandoResponse(message, requestId);
     });
     this.#disconnectCleanup = () => {
       transportErrors?.unsubscribe();
+      transportStatus?.unsubscribe();
+      decryptedMessages?.unsubscribe();
       disconnectCleanup?.();
     };
     this.nodeId = options.nodeId;
@@ -757,8 +855,24 @@ export class ZaptunnelClient {
       throw requestControlError(method, "request_aborted", "the CLN RPC request was aborted");
     }
 
+    if (this.#transportAbort.signal.aborted) {
+      throw (
+        this.#lastTransportError ??
+        new ZaptunnelRpcError("the Lightning transport is disconnected", {
+          code: "connection_closed",
+          method
+        })
+      );
+    }
+
     const operation = this.#transport.commando({ method, params, rune }) as Promise<T>;
-    return await controlRpcOperation(operation, method, options);
+    return await controlRpcOperation(
+      operation,
+      method,
+      options,
+      this.#transportAbort.signal,
+      () => this.#lastTransportError
+    );
   }
 
   getInfo<T = GetInfoResponse>(options: RpcCallOptions = {}): Promise<T> {
@@ -790,13 +904,11 @@ export class ZaptunnelClient {
     validateNonNegativeInteger(options.lastPayIndex, "lastPayIndex");
     validateNonNegativeInteger(options.waitTimeoutSeconds, "waitTimeoutSeconds");
 
-    const params: Record<string, number> = {};
+    const waitTimeoutSeconds = options.waitTimeoutSeconds ?? 30;
+    const params: Record<string, number> = { timeout: waitTimeoutSeconds };
     if (options.lastPayIndex !== undefined) params.lastpay_index = options.lastPayIndex;
-    if (options.waitTimeoutSeconds !== undefined) params.timeout = options.waitTimeoutSeconds;
 
-    const timeoutMs =
-      options.timeoutMs ??
-      (options.waitTimeoutSeconds === undefined ? undefined : options.waitTimeoutSeconds * 1_000 + 5_000);
+    const timeoutMs = options.timeoutMs ?? waitTimeoutSeconds * 1_000 + 5_000;
 
     return await this.call<PaidInvoice>("waitanyinvoice", params, {...options, timeoutMs});
   }
@@ -804,11 +916,13 @@ export class ZaptunnelClient {
   async *paidInvoices(options: PaidInvoiceStreamOptions = {}): AsyncGenerator<PaidInvoice, void, void> {
     const waitTimeoutSeconds = options.waitTimeoutSeconds ?? 30;
     const timeoutGraceMs = options.timeoutGraceMs ?? 5_000;
+    const retryDelayMs = options.retryDelayMs ?? 250;
     let lastPayIndex = options.lastPayIndex ?? 0;
 
     validateNonNegativeInteger(lastPayIndex, "lastPayIndex");
     validateNonNegativeInteger(waitTimeoutSeconds, "waitTimeoutSeconds");
     validateNonNegativeInteger(timeoutGraceMs, "timeoutGraceMs");
+    validateNonNegativeInteger(retryDelayMs, "retryDelayMs");
 
     while (!options.signal?.aborted) {
       try {
@@ -838,6 +952,7 @@ export class ZaptunnelClient {
           error instanceof ZaptunnelRpcError &&
           (error.code === "rpc_timeout" || error.rpcCode === 904)
         ) {
+          await waitForAbortableDelay(retryDelayMs, options.signal);
           continue;
         }
 
@@ -847,6 +962,7 @@ export class ZaptunnelClient {
   }
 
   disconnect(): void {
+    this.#transportAbort.abort();
     this.#disconnectCleanup?.();
     this.#disconnectCleanup = undefined;
     this.#transport.disconnect();
@@ -857,12 +973,69 @@ export class ZaptunnelClient {
     const subscription = this.#transport.connectionStatus$.subscribe(listener);
     return () => subscription.unsubscribe();
   }
+
+  #trackPartialCommandoResponse(message: Uint8Array, requestId?: string): void {
+    const type = readUint16(message, 0);
+    if (type !== COMMANDO_RESPONSE_CONTINUES_MESSAGE_TYPE && type !== COMMANDO_RESPONSE_MESSAGE_TYPE) {
+      return;
+    }
+    if (message.byteLength < 10) return;
+
+    const responseId = bytesToHex(message.subarray(2, 10));
+    const previous = this.#partialCommandoBytes.get(responseId) ?? 0;
+
+    if (type === COMMANDO_RESPONSE_MESSAGE_TYPE) {
+      this.#partialCommandoBytes.delete(responseId);
+      this.#partialCommandoTotalBytes -= previous;
+      return;
+    }
+
+    const next = previous + message.byteLength;
+    this.#partialCommandoBytes.set(responseId, next);
+    this.#partialCommandoTotalBytes += message.byteLength;
+
+    if (
+      this.#partialCommandoBytes.size > MAX_PARTIAL_COMMANDO_RESPONSES ||
+      next > MAX_PARTIAL_COMMANDO_BYTES ||
+      this.#partialCommandoTotalBytes > MAX_PARTIAL_COMMANDO_BYTES
+    ) {
+      this.#lastTransportError = new ZaptunnelError(
+        "the peer exceeded the partial Commando response budget",
+        { code: "transport_resource_limit", requestId }
+      );
+      this.#transportAbort.abort();
+      this.#transport.disconnect();
+    }
+  }
+}
+
+async function waitForAbortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ZaptunnelError("the operation was aborted", { code: "request_aborted" }));
+      return;
+    }
+
+    const timer = setTimeout(finish, delayMs);
+    signal?.addEventListener("abort", abort, { once: true });
+
+    function finish() {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }
+
+    function abort() {
+      clearTimeout(timer);
+      reject(new ZaptunnelError("the operation was aborted", { code: "request_aborted" }));
+    }
+  });
 }
 
 /** Request admission and establish an end-to-end BOLT-8 session with CLN. */
 export async function connect(options: ConnectOptions): Promise<ZaptunnelClient> {
   validateNodeId(options.nodeId);
   if (options.chainHash !== undefined) validateChainHash(options.chainHash);
+  validateNonNegativeInteger(options.connectionTimeoutMs, "connectionTimeoutMs");
   const { host, port } = parseAddress(options.address);
   const relay = parseRelay(options.relay ?? DEFAULT_RELAY, options.allowInsecureRelay ?? false);
   const admission = await requestAdmission(relay, options, globalThis.fetch);
@@ -881,8 +1054,6 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     initialTransportError = normalizeTransportError(error, admission.request_id);
   });
   let transportErrorSubscriptionTransferred = false;
-  const abortConnection = () => transport.disconnect();
-  options.signal?.addEventListener("abort", abortConnection, { once: true });
 
   let gossipFilterError: unknown;
   const gossipSubscription = transport.decryptedMsgs$.subscribe((message) => {
@@ -917,7 +1088,13 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
     // A relay ticket can be redeemed only once. Reusing the same wsProxy URL
     // through lnmessage's built-in reconnect can never establish a new relay
     // session, so resilient reconnects belong to ZaptunnelConnectionManager.
-    const connected = await transport.connect(false);
+    const connected = await controlConnectionOperation(
+      transport.connect(false),
+      options.signal,
+      options.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS,
+      () => transport.disconnect(),
+      admission.request_id
+    );
 
     if (!connected) {
       throw (
@@ -961,8 +1138,6 @@ export async function connect(options: ConnectOptions): Promise<ZaptunnelClient>
       requestId: admission.request_id,
       cause: error
     });
-  } finally {
-    options.signal?.removeEventListener("abort", abortConnection);
   }
 }
 
@@ -1013,9 +1188,11 @@ export class ZaptunnelConnectionManager {
   #listeners = new Set<(status: ZaptunnelManagerStatus) => void>();
   #stateListeners = new Set<(state: ZaptunnelManagerState) => void>();
   #waiters = new Set<ConnectionWaiter>();
-  #onlineListener = () => this.retryNow();
+  #onlineListener = () => this.#resumeAfterLifecycleEvent();
   #visibilityListener = () => {
-    if (typeof document === "undefined" || document.visibilityState === "visible") this.retryNow();
+    if (typeof document === "undefined" || document.visibilityState === "visible") {
+      this.#resumeAfterLifecycleEvent();
+    }
   };
 
   constructor(options: ConnectionManagerOptions) {
@@ -1245,12 +1422,20 @@ export class ZaptunnelConnectionManager {
     } catch (error) {
       if (this.#stopped || controller.signal.aborted) return;
 
-      this.#lastError = error;
-      if (this.#attempts >= this.#retry.maxAttempts) {
+      const failure = normalizeConnectionAttemptError(error);
+      this.#lastError = failure;
+      const retryable = diagnoseZaptunnelError(failure).retryable;
+
+      if (!retryable) {
+        this.#terminalError = failure;
+        this.#setStatus("failed");
+        for (const waiter of this.#waiters) waiter.reject(failure);
+        this.#waiters.clear();
+      } else if (this.#attempts >= this.#retry.maxAttempts) {
         this.#terminalError = new ZaptunnelError("connection retry attempts were exhausted", {
           code: "reconnect_exhausted",
-          requestId: error instanceof ZaptunnelError ? error.requestId : undefined,
-          cause: error
+          requestId: failure.requestId,
+          cause: failure
         });
         this.#setStatus("failed");
         for (const waiter of this.#waiters) waiter.reject(this.#terminalError);
@@ -1277,6 +1462,21 @@ export class ZaptunnelConnectionManager {
     this.#dropClient();
     this.#attempts = 0;
     this.#setStatus("waiting_reconnect");
+    this.#scheduleReconnect(this.#retry.minDelayMs);
+  }
+
+  #resumeAfterLifecycleEvent(): void {
+    if (
+      !this.#started ||
+      this.#stopped ||
+      this.#client ||
+      this.#attemptInFlight ||
+      this.#terminalError ||
+      !browserIsOnline()
+    ) {
+      return;
+    }
+
     this.#scheduleReconnect(this.#retry.minDelayMs);
   }
 
@@ -1577,8 +1777,7 @@ async function requestAdmission(
 
   if (attempt.response.status === 402 && attempt.body.error === "payment_required") {
     const challenge = parsePaymentChallenge(attempt.body);
-    const requestId =
-      attempt.body.request_id ?? attempt.response.headers.get("x-request-id") ?? undefined;
+    const requestId = relayRequestId(attempt.body.request_id, attempt.response.headers);
 
     if (!options.payment) throw new ZaptunnelPaymentRequiredError(challenge, { requestId });
     const issuedClaim = parsePaymentClaim(relay, options.nodeId, challenge, attempt.body);
@@ -1643,10 +1842,10 @@ function parseAdmissionAttempt(attempt: {
   body: Partial<AdmissionResponse> & { error?: string };
 }, relay: URL): AdmissionResponse {
   const { response, body } = attempt;
-  const requestId = body.request_id ?? response.headers.get("x-request-id") ?? undefined;
+  const requestId = relayRequestId(body.request_id, response.headers);
 
   if (!response.ok) {
-    const code = body.error ?? "admission_failed";
+    const code = typeof body.error === "string" ? body.error : "admission_failed";
     throw new ZaptunnelError(`Zaptunnel admission failed: ${code}`, {
       code,
       status: response.status,
@@ -1685,6 +1884,11 @@ function validWebsocketPath(path: unknown, relay: URL): path is string {
   } catch {
     return false;
   }
+}
+
+function relayRequestId(bodyValue: unknown, headers: Headers): string | undefined {
+  const candidate = typeof bodyValue === "string" ? bodyValue : headers.get("x-request-id");
+  return candidate && /^zt_[A-Za-z0-9_-]{16}$/.test(candidate) ? candidate : undefined;
 }
 
 function parsePaymentChallenge(body: {
@@ -1813,7 +2017,7 @@ async function pollPaymentClaim(
       lease?: string;
       lease_expires_at?: number;
     };
-    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const requestId = relayRequestId(undefined, response.headers);
 
     if (response.status === 202 || response.status === 429) {
       const retrySeconds = Number(response.headers.get("retry-after") ?? "2");
@@ -2123,10 +2327,64 @@ function validateNonNegativeInteger(value: number | undefined, name: string): vo
   }
 }
 
+async function controlConnectionOperation(
+  operation: Promise<boolean>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  disconnect: () => void,
+  requestId?: string
+): Promise<boolean> {
+  return await new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      callback();
+    };
+    const abort = () => {
+      disconnect();
+      finish(() =>
+        reject(
+          new ZaptunnelError("the Lightning connection attempt was aborted", {
+            code: "request_aborted",
+            requestId
+          })
+        )
+      );
+    };
+    const timer = setTimeout(() => {
+      disconnect();
+      finish(() =>
+        reject(
+          new ZaptunnelError(`the Lightning connection exceeded its ${timeoutMs}ms timeout`, {
+            code: "connection_timeout",
+            requestId
+          })
+        )
+      );
+    }, timeoutMs);
+
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+
+    operation.then(
+      (connected) => finish(() => resolve(connected)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
+
 async function controlRpcOperation<T>(
   operation: Promise<T>,
   method: string,
-  options: Pick<RpcCallOptions, "signal" | "timeoutMs">
+  options: Pick<RpcCallOptions, "signal" | "timeoutMs">,
+  transportSignal?: AbortSignal,
+  transportError?: () => ZaptunnelError | undefined
 ): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -2137,15 +2395,33 @@ async function controlRpcOperation<T>(
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
+      transportSignal?.removeEventListener("abort", transportClosed);
       callback();
     };
 
     const abort = () =>
       finish(() => reject(requestControlError(method, "request_aborted", "the CLN RPC request was aborted")));
 
-    options.signal?.addEventListener("abort", abort, { once: true });
+    const transportClosed = () =>
+      finish(() =>
+        reject(
+          transportError?.() ??
+            new ZaptunnelRpcError("the Lightning transport closed during the RPC request", {
+              code: "connection_closed",
+              method
+            })
+        )
+      );
 
-    if (options.timeoutMs !== undefined) {
+    options.signal?.addEventListener("abort", abort, { once: true });
+    transportSignal?.addEventListener("abort", transportClosed, { once: true });
+    if (transportSignal?.aborted) {
+      transportClosed();
+      return;
+    }
+
+    const timeoutMs = options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
+    if (timeoutMs !== undefined) {
       timer = setTimeout(
         () =>
           finish(() =>
@@ -2153,11 +2429,11 @@ async function controlRpcOperation<T>(
               requestControlError(
                 method,
                 "request_timeout",
-                `the CLN RPC request exceeded its ${options.timeoutMs}ms timeout`
+                `the CLN RPC request exceeded its ${timeoutMs}ms timeout`
               )
             )
           ),
-        options.timeoutMs
+        timeoutMs
       );
     }
 
@@ -2185,6 +2461,15 @@ function normalizeTransportError(
   return new ZaptunnelError(message, {
     code: transportCode === "decrypt_failure" ? "transport_integrity_failure" : "connection_failed",
     requestId,
+    cause: error
+  });
+}
+
+function normalizeConnectionAttemptError(error: unknown): ZaptunnelError {
+  if (error instanceof ZaptunnelError) return error;
+
+  return new ZaptunnelError("failed to establish the Lightning connection", {
+    code: "connection_failed",
     cause: error
   });
 }

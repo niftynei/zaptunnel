@@ -170,9 +170,10 @@ node.stop();
 stopWatching();
 ```
 
-The default policy retries forever with exponential backoff, 20% jitter, and a
-30-second ceiling. The manager also retries promptly when the browser reports
-that it is online again or returns to the foreground. Set a finite
+The default policy retries transient failures forever with exponential backoff,
+20% jitter, and a 30-second ceiling. Permanent admission and configuration
+errors stop the manager. Browser online and foreground events can resume a
+missing retry timer, but do not reset the attempt count or bypass backoff. Set a finite
 `maxAttempts` when an application wants a terminal `failed` state; call
 `retryNow()` after that state to begin a fresh retry cycle.
 
@@ -295,6 +296,12 @@ finite CLN-side timeout (30 seconds by default). An aborted poll may remain at
 the node until that timeout expires, but it cannot deliver a result to the
 stopped iterator.
 
+Connection establishment has a 15-second local deadline by default. Ordinary
+RPC calls have a 30-second local deadline, and `waitAnyInvoice()` also defaults
+to a 30-second CLN-side timeout. Override these with `connectionTimeoutMs`,
+`timeoutMs`, or `waitTimeoutSeconds` when an operation deliberately needs a
+different bound. Closing the Lightning transport rejects in-flight RPC callers.
+
 Other `wait*` RPCs can be invoked with `call()` too. `waitinvoice` is useful for
 one known label. The generic `wait` RPC appeared in CLN v23.08 and has had
 response-shape changes, so check capabilities and CLN's versioned documentation
@@ -342,6 +349,9 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `request_timeout` | The SDK stopped waiting at the local deadline |
 | `request_aborted` | The supplied `AbortSignal` was aborted |
 | `connection_failed` | CLN could not complete the requested connection |
+| `connection_timeout` | WebSocket or BOLT-8 establishment exceeded its local deadline |
+| `connection_closed` | The Lightning transport closed during connection or RPC work |
+| `transport_resource_limit` | Partial Commando responses exceeded the SDK memory budget |
 | `payment_required` | Free slots are occupied and the relay offered a Lightning invoice |
 | `payment_failed` | The application wallet did not complete payment |
 | `invalid_preimage` | The supplied payment proof does not match the invoice |
@@ -359,8 +369,8 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `manager_stopped` | An operation waited on a manager that was permanently stopped |
 
 Relay admission errors use the same base class. Current codes include
-`rate_limited`, `connection_limit`, `endpoint_unverified`, `onion_unavailable`,
-`relay_draining`, and
+`rate_limited`, `connection_limit`, `pending_limit`, `endpoint_unverified`,
+`non_public_address`, `onion_unavailable`, `relay_draining`, and
 `relay_overloaded`. Code should branch on `error.code`, not message text:
 
 ```ts
