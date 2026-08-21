@@ -60,6 +60,8 @@ unless config_env() == :test do
     ticket_ttl_ms: String.to_integer(System.get_env("ZAPTUNNEL_TICKET_TTL_MS", "10000")),
     free_sessions_per_node:
       String.to_integer(System.get_env("ZAPTUNNEL_FREE_SESSIONS_PER_NODE", "3")),
+    max_pending_sessions:
+      String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_SESSIONS", "1024")),
     payments_enabled: payments_enabled,
     payment_price_sats: String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_PRICE_SATS", "10")),
     payment_network: System.get_env("ZAPTUNNEL_PAYMENT_NETWORK", "mainnet"),
@@ -91,7 +93,7 @@ unless config_env() == :test do
     max_total_sessions:
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_TOTAL_SESSIONS", "10000")),
     max_pending_sessions_per_node:
-      String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_SESSIONS_PER_NODE", "1")),
+      String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_SESSIONS_PER_NODE", "3")),
     connect_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_CONNECT_TIMEOUT_MS", "5000")),
     tcp_send_timeout_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_TCP_SEND_TIMEOUT_MS", "5000")),
@@ -119,6 +121,8 @@ unless config_env() == :test do
       String.to_integer(System.get_env("ZAPTUNNEL_GLOBAL_RATE_LIMIT_BURST", "32")),
     global_rate_limit_refill_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_GLOBAL_RATE_LIMIT_REFILL_MS", "100")),
+    admission_global_rate_limit_enabled:
+      System.get_env("ZAPTUNNEL_ADMISSION_GLOBAL_RATE_LIMIT_ENABLED", "false") in ["1", "true"],
     payment_claim_rate_limit_burst:
       String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_CLAIM_RATE_LIMIT_BURST", "10")),
     payment_claim_rate_limit_refill_ms:
@@ -133,6 +137,8 @@ unless config_env() == :test do
       String.to_integer(System.get_env("ZAPTUNNEL_RATE_LIMIT_MAX_BUCKETS", "10000")),
     max_websocket_frame_bytes:
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_WEBSOCKET_FRAME_BYTES", "65583")),
+    http2_max_concurrent_streams:
+      String.to_integer(System.get_env("ZAPTUNNEL_HTTP2_MAX_CONCURRENT_STREAMS", "32")),
     session_idle_timeout_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_SESSION_IDLE_TIMEOUT_MS", "300000")),
     drain_timeout_ms: String.to_integer(System.get_env("ZAPTUNNEL_DRAIN_TIMEOUT_MS", "30000")),

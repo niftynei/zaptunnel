@@ -19,9 +19,9 @@ defmodule ZaptunnelRelay.Router do
 
   plug(:request_id)
   plug(:surface)
-  plug(:static)
   plug(:cors)
   plug(:security_headers)
+  plug(:static)
   plug(:match)
   plug(:limit_admission)
   plug(:parse_admission_body)
@@ -240,7 +240,10 @@ defmodule ZaptunnelRelay.Router do
   end
 
   defp security_headers(conn, _opts) do
-    conn = put_resp_header(conn, "x-content-type-options", "nosniff")
+    conn =
+      conn
+      |> put_resp_header("x-content-type-options", "nosniff")
+      |> maybe_put_website_security_headers()
 
     if Application.get_env(:zaptunnel_relay, :tls, false) == false do
       conn
@@ -249,10 +252,37 @@ defmodule ZaptunnelRelay.Router do
     end
   end
 
+  defp maybe_put_website_security_headers(%{assigns: %{zaptunnel_surface: surface}} = conn)
+       when surface in [:website, :development] do
+    conn
+    |> put_resp_header(
+      "content-security-policy",
+      "default-src 'self'; connect-src 'self' https://relay.zapptunnel.com wss://relay.zapptunnel.com; img-src 'self' data:; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    )
+    |> put_resp_header("referrer-policy", "no-referrer")
+  end
+
+  defp maybe_put_website_security_headers(conn), do: conn
+
   defp limit_admission(%{method: "POST", path_info: ["v1", "connections"]} = conn, _opts) do
     case ZaptunnelRelay.RateLimiter.check(conn.remote_ip) do
-      :ok -> conn
-      {:error, :rate_limited} -> conn |> json(429, %{error: "rate_limited"}) |> halt()
+      :ok ->
+        conn
+
+      {:error, :rate_limited} ->
+        request_id = conn.assigns.zaptunnel_request_id
+
+        ZaptunnelRelay.Telemetry.emit(
+          [:admission, :request],
+          %{count: 1},
+          %{result: {:error, :rate_limited}}
+        )
+
+        Logger.warning(
+          "admission rejected request_id=#{request_id} stage=rate_limit reason=rate_limited"
+        )
+
+        conn |> json(429, %{error: "rate_limited"}) |> halt()
     end
   end
 
@@ -388,7 +418,8 @@ defmodule ZaptunnelRelay.Router do
         with {:ok, lease_id} <- ZaptunnelRelay.Payments.authorize_lease(lease, node_id) do
           ZaptunnelRelay.Admission.issue(node_id, address,
             request_id: request_id,
-            paid_lease: lease_id
+            paid_lease: lease_id,
+            source: conn.remote_ip
           )
         end
 
@@ -397,13 +428,17 @@ defmodule ZaptunnelRelay.Router do
              {:ok, ticket} <-
                ZaptunnelRelay.Admission.issue(node_id, address,
                  request_id: request_id,
-                 paid_lease: paid_lease.id
+                 paid_lease: paid_lease.id,
+                 source: conn.remote_ip
                ) do
           {:ok, ticket, paid_lease, receipt}
         end
 
       true ->
-        case ZaptunnelRelay.Admission.issue(node_id, address, request_id: request_id) do
+        case ZaptunnelRelay.Admission.issue(node_id, address,
+               request_id: request_id,
+               source: conn.remote_ip
+             ) do
           {:error, :connection_limit} = limit ->
             if ZaptunnelRelay.Payments.enabled?() do
               case ZaptunnelRelay.Payments.challenge(node_id, conn.host, conn.remote_ip) do

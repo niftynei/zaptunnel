@@ -42,6 +42,17 @@ defmodule ZaptunnelRelay.SessionTest do
     assert :ok = Session.terminate(:normal, state)
   end
 
+  test "destination close requests immediate WebSocket teardown" do
+    listener = listen(fn socket -> :gen_tcp.recv(socket, 0, 100) end)
+    {:ok, port} = :inet.port(listener)
+    assert {:ok, state} = Session.init(%{address: {{127, 0, 0, 1}, port}, node_id: @node_id})
+
+    assert {:stop, {:shutdown, :node_closed}, state} =
+             Session.handle_info({:tcp_closed, state.socket}, state)
+
+    assert :ok = Session.terminate(:normal, state)
+  end
+
   test "logs a correlated and bounded session dial failure" do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)

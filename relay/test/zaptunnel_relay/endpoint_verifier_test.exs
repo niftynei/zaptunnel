@@ -70,6 +70,10 @@ defmodule ZaptunnelRelay.EndpointVerifierTest do
              )
 
     assert :ok = Task.await(first)
+    assert %{pending_by_source: %{}} = :sys.get_state(EndpointVerifier)
+
+    assert :ok =
+             EndpointVerifier.verify(@node_id, {{127, 0, 0, 3}, 9_735}, source: source)
   end
 
   test "caps waiters coalesced onto one endpoint" do

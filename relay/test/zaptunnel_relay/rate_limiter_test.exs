@@ -10,6 +10,7 @@ defmodule ZaptunnelRelay.RateLimiterTest do
             :rate_limit_refill_ms,
             :global_rate_limit_burst,
             :global_rate_limit_refill_ms,
+            :admission_global_rate_limit_enabled,
             :rate_limit_max_buckets
           ],
           into: %{} do
@@ -53,12 +54,23 @@ defmodule ZaptunnelRelay.RateLimiterTest do
   end
 
   test "enforces a relay-wide ceiling across source addresses" do
+    Application.put_env(:zaptunnel_relay, :admission_global_rate_limit_enabled, true)
     Application.put_env(:zaptunnel_relay, :global_rate_limit_burst, 2)
     Application.put_env(:zaptunnel_relay, :global_rate_limit_refill_ms, 60_000)
 
     assert :ok = RateLimiter.check({192, 0, 2, 1})
     assert :ok = RateLimiter.check({192, 0, 2, 2})
     assert {:error, :rate_limited} = RateLimiter.check({192, 0, 2, 3})
+  end
+
+  test "does not let distributed sources drain a global admission bucket by default" do
+    Application.put_env(:zaptunnel_relay, :admission_global_rate_limit_enabled, false)
+    Application.put_env(:zaptunnel_relay, :global_rate_limit_burst, 1)
+    Application.put_env(:zaptunnel_relay, :global_rate_limit_refill_ms, 60_000)
+
+    for last <- 1..100 do
+      assert :ok = RateLimiter.check({192, 0, 2, last})
+    end
   end
 
   test "bounds the number of remembered source buckets" do

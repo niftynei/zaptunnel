@@ -270,6 +270,8 @@ defmodule ZaptunnelRelay.ClnEndpointIntegrationTest do
       "--disable-plugin=recover",
       "--disable-plugin=spenderp",
       "--disable-plugin=sql",
+      "--disable-plugin=cln-grpc",
+      "--disable-plugin=clnrest",
       "--log-file=#{Path.join(directory, "lightning.log")}"
     ]
 

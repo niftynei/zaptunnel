@@ -59,7 +59,7 @@ defmodule ZaptunnelRelay.Metrics do
   defp initial_state do
     %{
       admission: %{},
-      rate_limited: 0,
+      rate_limited: %{},
       verification: %{},
       verification_failures: %{},
       verification_cache: %{},
@@ -85,8 +85,9 @@ defmodule ZaptunnelRelay.Metrics do
     update_in(state.admission, &increment(&1, admission_result(metadata[:result])))
   end
 
-  defp record(state, [:zaptunnel_relay, :admission, :rate_limited], measurements, _metadata) do
-    %{state | rate_limited: state.rate_limited + measurements[:count]}
+  defp record(state, [:zaptunnel_relay, :admission, :rate_limited], measurements, metadata) do
+    scope = metadata[:scope] |> to_string()
+    update_in(state.rate_limited, &increment_by(&1, scope, measurements[:count]))
   end
 
   defp record(state, [:zaptunnel_relay, :verification, :cache_hit], _measurements, metadata) do
@@ -182,10 +183,10 @@ defmodule ZaptunnelRelay.Metrics do
       labelled("zaptunnel_admission_requests_total", "result", metrics.admission),
       help(
         "zaptunnel_rate_limited_total",
-        "Admission requests rejected by source rate limiting",
+        "Requests rejected by source rate limiting",
         "counter"
       ),
-      sample("zaptunnel_rate_limited_total", metrics.rate_limited),
+      labelled("zaptunnel_rate_limited_total", "scope", metrics.rate_limited),
       help("zaptunnel_endpoint_verifications_total", "Endpoint verification results", "counter"),
       labelled("zaptunnel_endpoint_verifications_total", "result", metrics.verification),
       help(
@@ -237,6 +238,11 @@ defmodule ZaptunnelRelay.Metrics do
       sample("zaptunnel_sessions{state=\"pending\"}", admission.pending),
       sample("zaptunnel_sessions{state=\"active\"}", admission.active),
       sample("zaptunnel_sessions{state=\"total\"}", admission.total),
+      help("zaptunnel_pending_session_capacity", "Configured pending ticket capacity", "gauge"),
+      sample(
+        "zaptunnel_pending_session_capacity",
+        Application.fetch_env!(:zaptunnel_relay, :max_pending_sessions)
+      ),
       help(
         "zaptunnel_payment_challenges_total",
         "Connection payment challenges by outcome",

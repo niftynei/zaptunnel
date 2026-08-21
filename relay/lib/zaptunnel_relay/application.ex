@@ -63,7 +63,23 @@ defmodule ZaptunnelRelay.Application do
   end
 
   def server_options(ip, port) do
-    base = [plug: ZaptunnelRelay.Router, ip: ip, port: port]
+    base = [
+      plug: ZaptunnelRelay.Router,
+      ip: ip,
+      port: port,
+      http_2_options: [
+        default_local_settings: [
+          max_concurrent_streams:
+            Application.fetch_env!(:zaptunnel_relay, :http2_max_concurrent_streams)
+        ]
+      ],
+      websocket_options: [
+        max_frame_size: Application.fetch_env!(:zaptunnel_relay, :max_websocket_frame_bytes),
+        max_fragmented_message_size:
+          Application.fetch_env!(:zaptunnel_relay, :max_websocket_frame_bytes),
+        log_protocol_errors: false
+      ]
+    ]
 
     case Application.fetch_env!(:zaptunnel_relay, :tls) do
       false ->

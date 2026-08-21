@@ -10,7 +10,8 @@ defmodule ZaptunnelRelay.Admission do
   def issue(node_id, address, opts \\ []) do
     GenServer.call(
       __MODULE__,
-      {:issue, node_id, address, Keyword.get(opts, :request_id), Keyword.get(opts, :paid_lease)}
+      {:issue, node_id, address, Keyword.get(opts, :request_id), Keyword.get(opts, :paid_lease),
+       Keyword.get(opts, :source)}
     )
   end
 
@@ -46,6 +47,7 @@ defmodule ZaptunnelRelay.Admission do
        active: %{},
        counts: %{},
        pending_counts: %{},
+       pending_sources: %{},
        paid_leases: MapSet.new(),
        total: 0,
        draining: false
@@ -53,12 +55,21 @@ defmodule ZaptunnelRelay.Admission do
   end
 
   @impl true
-  def handle_call({:issue, node_id, address, request_id, paid_lease}, _from, state) do
+  def handle_call({:issue, node_id, address, request_id, paid_lease, source}, _from, state) do
+    state =
+      if state.draining,
+        do: state,
+        else: replace_pending_retry(state, node_id, paid_lease, source)
+
     cond do
       state.draining ->
         {:reply, {:error, :relay_draining}, state}
 
       state.total >= Application.fetch_env!(:zaptunnel_relay, :max_total_sessions) ->
+        {:reply, {:error, :relay_overloaded}, state}
+
+      map_size(state.tickets) >=
+          Application.fetch_env!(:zaptunnel_relay, :max_pending_sessions) ->
         {:reply, {:error, :relay_overloaded}, state}
 
       is_binary(paid_lease) and MapSet.member?(state.paid_leases, paid_lease) ->
@@ -84,6 +95,7 @@ defmodule ZaptunnelRelay.Admission do
           address: address,
           request_id: request_id,
           paid_lease: paid_lease,
+          source_key: pending_source_key(node_id, paid_lease, source),
           timer: timer
         }
 
@@ -92,6 +104,7 @@ defmodule ZaptunnelRelay.Admission do
           | tickets: Map.put(state.tickets, ticket, entry),
             counts: Map.update(state.counts, node_id, 1, &(&1 + 1)),
             pending_counts: Map.update(state.pending_counts, node_id, 1, &(&1 + 1)),
+            pending_sources: add_pending_source(state.pending_sources, entry.source_key, ticket),
             paid_leases: add_paid_lease(state.paid_leases, paid_lease),
             total: state.total + 1
         }
@@ -110,6 +123,7 @@ defmodule ZaptunnelRelay.Admission do
        active: %{},
        counts: %{},
        pending_counts: %{},
+       pending_sources: %{},
        paid_leases: MapSet.new(),
        total: 0,
        draining: false
@@ -152,7 +166,8 @@ defmodule ZaptunnelRelay.Admission do
            state
            | tickets: tickets,
              active: active,
-             pending_counts: decrement(state.pending_counts, entry.node_id)
+             pending_counts: decrement(state.pending_counts, entry.node_id),
+             pending_sources: remove_pending_source(state.pending_sources, entry.source_key)
          }}
     end
   end
@@ -163,13 +178,14 @@ defmodule ZaptunnelRelay.Admission do
       {nil, _tickets} ->
         {:noreply, state}
 
-      {%{node_id: node_id, paid_lease: paid_lease}, tickets} ->
+      {%{node_id: node_id, paid_lease: paid_lease, source_key: source_key}, tickets} ->
         {:noreply,
          %{
            state
            | tickets: tickets,
              counts: decrement(state.counts, node_id),
              pending_counts: decrement(state.pending_counts, node_id),
+             pending_sources: remove_pending_source(state.pending_sources, source_key),
              paid_leases: remove_paid_lease(state.paid_leases, paid_lease),
              total: state.total - 1
          }}
@@ -204,4 +220,38 @@ defmodule ZaptunnelRelay.Admission do
   defp add_paid_lease(leases, lease), do: MapSet.put(leases, lease)
   defp remove_paid_lease(leases, nil), do: leases
   defp remove_paid_lease(leases, lease), do: MapSet.delete(leases, lease)
+
+  defp pending_source_key(node_id, nil, source) when not is_nil(source),
+    do: {node_id, ZaptunnelRelay.RateLimiter.source_key(source)}
+
+  defp pending_source_key(_node_id, _paid_lease, _source), do: nil
+
+  defp add_pending_source(sources, nil, _ticket), do: sources
+  defp add_pending_source(sources, key, ticket), do: Map.put(sources, key, ticket)
+  defp remove_pending_source(sources, nil), do: sources
+  defp remove_pending_source(sources, key), do: Map.delete(sources, key)
+
+  defp replace_pending_retry(state, node_id, nil, source) when not is_nil(source) do
+    key = pending_source_key(node_id, nil, source)
+
+    case Map.pop(state.pending_sources, key) do
+      {nil, _sources} ->
+        state
+
+      {ticket, sources} ->
+        {entry, tickets} = Map.pop!(state.tickets, ticket)
+        Process.cancel_timer(entry.timer)
+
+        %{
+          state
+          | tickets: tickets,
+            counts: decrement(state.counts, node_id),
+            pending_counts: decrement(state.pending_counts, node_id),
+            pending_sources: sources,
+            total: state.total - 1
+        }
+    end
+  end
+
+  defp replace_pending_retry(state, _node_id, _paid_lease, _source), do: state
 end

@@ -38,15 +38,7 @@ defmodule ZaptunnelRelay.RateLimiter do
         if source_result == :empty do
           {:limited, buckets, state.globals}
         else
-          {global_result, global_bucket} =
-            take(
-              Map.get(state.globals, scope),
-              policy.global_burst,
-              policy.global_refill_ms,
-              now
-            )
-
-          {global_result, buckets, Map.put(state.globals, scope, global_bucket)}
+          take_global(state.globals, scope, policy, now, buckets)
         end
       end
 
@@ -60,13 +52,33 @@ defmodule ZaptunnelRelay.RateLimiter do
     if result == :ok do
       {:reply, :ok, state}
     else
-      ZaptunnelRelay.Telemetry.emit([:admission, :rate_limited], %{count: 1})
+      ZaptunnelRelay.Telemetry.emit(
+        [:admission, :rate_limited],
+        %{count: 1},
+        %{scope: scope}
+      )
+
       {:reply, {:error, :rate_limited}, state}
     end
   end
 
   def handle_call(:reset, _from, _state),
     do: {:reply, :ok, %{buckets: %{}, globals: %{}, checks: 0}}
+
+  defp take_global(globals, _scope, %{global?: false}, _now, buckets),
+    do: {:ok, buckets, globals}
+
+  defp take_global(globals, scope, policy, now, buckets) do
+    {global_result, global_bucket} =
+      take(
+        Map.get(globals, scope),
+        policy.global_burst,
+        policy.global_refill_ms,
+        now
+      )
+
+    {global_result, buckets, Map.put(globals, scope, global_bucket)}
+  end
 
   defp take(nil, burst, _refill_ms, now) when burst >= 1,
     do: {:ok, %{tokens: burst - 1, updated_at: now}}
@@ -95,6 +107,7 @@ defmodule ZaptunnelRelay.RateLimiter do
 
   defp policy(:payment_claim) do
     %{
+      global?: true,
       burst: Application.fetch_env!(:zaptunnel_relay, :payment_claim_rate_limit_burst),
       refill_ms: Application.fetch_env!(:zaptunnel_relay, :payment_claim_rate_limit_refill_ms),
       global_burst:
@@ -106,6 +119,7 @@ defmodule ZaptunnelRelay.RateLimiter do
 
   defp policy(_scope) do
     %{
+      global?: Application.fetch_env!(:zaptunnel_relay, :admission_global_rate_limit_enabled),
       burst: Application.fetch_env!(:zaptunnel_relay, :rate_limit_burst),
       refill_ms: Application.fetch_env!(:zaptunnel_relay, :rate_limit_refill_ms),
       global_burst: Application.fetch_env!(:zaptunnel_relay, :global_rate_limit_burst),

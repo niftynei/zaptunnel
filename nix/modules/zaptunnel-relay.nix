@@ -314,6 +314,9 @@ in {
             ZAPTUNNEL_LISTEN_ADDRESS = cfg.listenAddress;
             ZAPTUNNEL_WEB_PORT = toString cfg.webPort;
             ZAPTUNNEL_DRAIN_TIMEOUT_MS = toString (cfg.drainTimeoutSeconds * 1000);
+            ZAPTUNNEL_HTTP2_MAX_CONCURRENT_STREAMS = "32";
+            ZAPTUNNEL_MAX_PENDING_SESSIONS = "1024";
+            ZAPTUNNEL_MAX_PENDING_SESSIONS_PER_NODE = "3";
           }
           // lib.optionalAttrs cfg.tls.enable {
             ZAPTUNNEL_TLS_CERTFILE = certificateFile;
@@ -363,6 +366,9 @@ in {
             AmbientCapabilities = lib.optional (cfg.webPort < 1024) "CAP_NET_BIND_SERVICE";
             CapabilityBoundingSet = lib.optional (cfg.webPort < 1024) "CAP_NET_BIND_SERVICE";
             LockPersonality = true;
+            LimitNOFILE = 65536;
+            MemoryHigh = "1G";
+            MemoryMax = "1536M";
             MemoryDenyWriteExecute = false;
             NoNewPrivileges = true;
             PrivateDevices = true;
@@ -383,6 +389,7 @@ in {
             RestrictSUIDSGID = true;
             SystemCallArchitectures = "native";
             SystemCallFilter = ["@system-service" "~@privileged"];
+            TasksMax = 4096;
           }
           // cfg.extraServiceConfig;
       };

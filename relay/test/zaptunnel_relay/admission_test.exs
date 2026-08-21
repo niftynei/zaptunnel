@@ -29,9 +29,20 @@ defmodule ZaptunnelRelay.AdmissionTest do
     Process.exit(second_owner, :kill)
   end
 
-  test "allows only one unclaimed ticket per node" do
+  test "bounds unclaimed tickets without letting one request hold the node" do
     assert {:ok, _ticket} = Admission.issue(@node_id, @address)
-    assert {:error, :pending_limit} = Admission.issue(@node_id, @address)
+    assert {:ok, _ticket} = Admission.issue(@node_id, @address)
+    assert {:ok, _ticket} = Admission.issue(@node_id, @address)
+    assert {:error, :connection_limit} = Admission.issue(@node_id, @address)
+  end
+
+  test "a retry from the same source replaces its pending ticket" do
+    source = {192, 0, 2, 1}
+    assert {:ok, first} = Admission.issue(@node_id, @address, source: source)
+    assert {:ok, second} = Admission.issue(@node_id, @address, source: source)
+    refute first == second
+    assert {:error, :invalid_ticket} = Admission.claim(first)
+    assert {:ok, _target} = Admission.claim(second)
   end
 
   test "carries the admission request id into the claimed session" do
@@ -50,9 +61,24 @@ defmodule ZaptunnelRelay.AdmissionTest do
   end
 
   test "expired tickets release their slot" do
-    assert {:ok, _ticket} = Admission.issue(@node_id, @address)
-    assert {:error, :pending_limit} = Admission.issue(@node_id, @address)
+    for _index <- 1..3 do
+      assert {:ok, _ticket} = Admission.issue(@node_id, @address)
+    end
+
+    assert {:error, :connection_limit} = Admission.issue(@node_id, @address)
     eventually(fn -> match?({:ok, _ticket}, Admission.issue(@node_id, @address)) end)
+  end
+
+  test "enforces an explicit relay-wide pending ticket ceiling" do
+    previous = Application.fetch_env!(:zaptunnel_relay, :max_pending_sessions)
+    Application.put_env(:zaptunnel_relay, :max_pending_sessions, 2)
+    on_exit(fn -> Application.put_env(:zaptunnel_relay, :max_pending_sessions, previous) end)
+
+    assert {:ok, _ticket} = Admission.issue(@node_id, @address)
+    assert {:ok, _ticket} = Admission.issue("03" <> String.duplicate("22", 32), @address)
+
+    assert {:error, :relay_overloaded} =
+             Admission.issue("02" <> String.duplicate("33", 32), @address)
   end
 
   test "enforces a relay-wide session ceiling" do

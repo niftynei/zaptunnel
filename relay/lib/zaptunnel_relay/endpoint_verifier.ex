@@ -29,7 +29,7 @@ defmodule ZaptunnelRelay.EndpointVerifier do
   @impl true
   def init(_opts) do
     schedule_sweep()
-    {:ok, %{cache: %{}, cache_order: :queue.new(), pending: %{}}}
+    {:ok, %{cache: %{}, cache_order: :queue.new(), pending: %{}, pending_by_source: %{}}}
   end
 
   @impl true
@@ -46,7 +46,7 @@ defmodule ZaptunnelRelay.EndpointVerifier do
         case Map.get(state.pending, key) do
           nil ->
             if map_size(state.pending) >= max_pending() or
-                 pending_for_source(state.pending, source) >= max_pending_per_source() do
+                 Map.get(state.pending_by_source, source, 0) >= max_pending_per_source() do
               {:reply, {:error, :relay_overloaded}, state}
             else
               task =
@@ -67,7 +67,16 @@ defmodule ZaptunnelRelay.EndpointVerifier do
                   started_at: now
                 })
 
-              {:noreply, %{state | pending: pending, cache: Map.delete(state.cache, key)}}
+              pending_by_source =
+                Map.update(state.pending_by_source, source, 1, &(&1 + 1))
+
+              {:noreply,
+               %{
+                 state
+                 | pending: pending,
+                   pending_by_source: pending_by_source,
+                   cache: Map.delete(state.cache, key)
+               }}
             end
 
           entry ->
@@ -89,7 +98,7 @@ defmodule ZaptunnelRelay.EndpointVerifier do
       Enum.each(entry.waiters, &GenServer.reply(&1.from, {:error, :relay_overloaded}))
     end)
 
-    {:reply, :ok, %{cache: %{}, cache_order: :queue.new(), pending: %{}}}
+    {:reply, :ok, %{cache: %{}, cache_order: :queue.new(), pending: %{}, pending_by_source: %{}}}
   end
 
   @impl true
@@ -171,7 +180,9 @@ defmodule ZaptunnelRelay.EndpointVerifier do
         state
       end
 
-    %{state | pending: Map.delete(state.pending, key)}
+    pending_by_source = decrement_pending_source(state.pending_by_source, entry.source)
+
+    %{state | pending: Map.delete(state.pending, key), pending_by_source: pending_by_source}
   end
 
   defp put_cache(state, key, entry) do
@@ -297,8 +308,11 @@ defmodule ZaptunnelRelay.EndpointVerifier do
     Application.fetch_env!(:zaptunnel_relay, :verification_cache_max_size)
   end
 
-  defp pending_for_source(pending, source) do
-    Enum.count(pending, fn {_key, entry} -> entry.source == source end)
+  defp decrement_pending_source(pending_by_source, source) do
+    case Map.get(pending_by_source, source) do
+      count when count > 1 -> Map.put(pending_by_source, source, count - 1)
+      _zero_or_one -> Map.delete(pending_by_source, source)
+    end
   end
 
   defp obscure_probe_timing({:error, :endpoint_unverified} = result, started_at, timeout) do

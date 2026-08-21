@@ -187,6 +187,12 @@ alerts` for its private UI. No third-party notification receiver is configured
 by default, so adding email, ntfy, or another destination remains an operator
 choice rather than a secret embedded in the Nix store.
 
+The generated relay unit also sets finite memory, task, and file-descriptor
+ceilings. `extraServiceConfig` can override the defaults for a deliberately
+larger deployment. The listener caps concurrent HTTP/2 streams and WebSocket
+frame/message sizes, while admission maintains a separate global ceiling for
+unclaimed tickets.
+
 Open the Grafana SSH tunnel with:
 
 ```console

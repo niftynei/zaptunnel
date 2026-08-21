@@ -131,7 +131,9 @@ untrusted callers.
 
 A session consumes a slot while it is pending or active. Slot acquisition and
 release are atomic so simultaneous requests cannot exceed the limit. Only one
-unclaimed free ticket may exist per destination at a time. A slot is released
+unclaimed free ticket per source prefix is retained: a retry replaces that
+source's earlier ticket. Up to three unclaimed tickets may exist per destination,
+and the relay applies a separate global pending-ticket ceiling. A slot is released
 when its short-lived ticket expires, either side disconnects, or the session
 process terminates. Because the relay cannot distinguish an inner BOLT-8
 handshake from other encrypted bytes, it enforces byte and idle limits rather

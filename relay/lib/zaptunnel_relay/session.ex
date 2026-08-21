@@ -55,7 +55,7 @@ defmodule ZaptunnelRelay.Session do
   end
 
   def handle_in({_data, [opcode: :text]}, state) do
-    {:stop, :unsupported_data, state}
+    {:stop, {:shutdown, :unsupported_data}, state}
   end
 
   @impl true
@@ -65,7 +65,10 @@ defmodule ZaptunnelRelay.Session do
   end
 
   def handle_info({:tcp_closed, socket}, %{socket: socket} = state) do
-    {:stop, :normal, state}
+    # A normal WebSocket close waits for an acknowledgement from the browser.
+    # A non-cooperative client could otherwise retain the admission slot until
+    # the full idle timeout after the destination has already gone away.
+    {:stop, {:shutdown, :node_closed}, state}
   end
 
   def handle_info({:tcp_error, socket, reason}, %{socket: socket} = state) do

@@ -179,6 +179,29 @@ defmodule ZaptunnelRelay.RouterTest do
     assert %{"error" => "rate_limited"} = Jason.decode!(response.resp_body)
   end
 
+  test "logs and meters admission requests rejected by the limiter" do
+    previous_burst = Application.fetch_env!(:zaptunnel_relay, :rate_limit_burst)
+    previous_refill = Application.fetch_env!(:zaptunnel_relay, :rate_limit_refill_ms)
+    Application.put_env(:zaptunnel_relay, :rate_limit_burst, 0)
+    Application.put_env(:zaptunnel_relay, :rate_limit_refill_ms, 60_000)
+    RateLimiter.reset()
+
+    on_exit(fn ->
+      Application.put_env(:zaptunnel_relay, :rate_limit_burst, previous_burst)
+      Application.put_env(:zaptunnel_relay, :rate_limit_refill_ms, previous_refill)
+      RateLimiter.reset()
+    end)
+
+    {response, log} = capture_result_log(&post_connection/0)
+    assert response.status == 429
+    assert log =~ "stage=rate_limit reason=rate_limited"
+
+    eventually(fn ->
+      ZaptunnelRelay.Metrics.render() =~
+        ~s(zaptunnel_admission_requests_total{result="rate_limited"})
+    end)
+  end
+
   test "supports the advertised websocket path without a trailing target" do
     response = Router.call(conn(:get, "/v1/connect/not-a-ticket"), [])
     assert response.status == 401
@@ -213,6 +236,20 @@ defmodule ZaptunnelRelay.RouterTest do
     assert get_resp_header(response, "strict-transport-security") == [
              "max-age=31536000; includeSubDomains"
            ]
+  end
+
+  test "static assets receive the website security headers" do
+    favicon = Application.app_dir(:zaptunnel_relay, "priv/static/favicon.svg")
+    File.mkdir_p!(Path.dirname(favicon))
+    File.write!(favicon, ~s(<svg xmlns="http://www.w3.org/2000/svg"/>))
+    on_exit(fn -> File.rm(favicon) end)
+
+    response = Router.call(conn(:get, "/favicon.svg"), [])
+
+    assert response.status == 200
+    assert get_resp_header(response, "x-content-type-options") == ["nosniff"]
+    assert get_resp_header(response, "content-security-policy") != []
+    assert get_resp_header(response, "referrer-policy") == ["no-referrer"]
   end
 
   test "separates the website, relay, and unknown hosts" do
@@ -394,4 +431,17 @@ defmodule ZaptunnelRelay.RouterTest do
     assert_receive {:logged_result, result}
     {result, log}
   end
+
+  defp eventually(assertion, attempts \\ 20)
+
+  defp eventually(assertion, attempts) when attempts > 0 do
+    if assertion.() do
+      :ok
+    else
+      Process.sleep(10)
+      eventually(assertion, attempts - 1)
+    end
+  end
+
+  defp eventually(_assertion, 0), do: flunk("condition was not met")
 end
