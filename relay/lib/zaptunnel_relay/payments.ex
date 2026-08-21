@@ -15,16 +15,24 @@ defmodule ZaptunnelRelay.Payments do
 
   def redeem(authorization, node_id) do
     with {:ok, proof} <- PaymentProtocol.parse_credential(authorization) do
-      GenServer.call(__MODULE__, {:redeem, proof, node_id})
+      safe_call({:redeem, proof, node_id})
     end
   end
 
   def authorize_lease(token, node_id) do
-    GenServer.call(__MODULE__, {:authorize_lease, token, node_id})
+    safe_call({:authorize_lease, token, node_id})
   end
 
   def claim(quote_id, claim_token) do
-    GenServer.call(__MODULE__, {:claim, quote_id, claim_token})
+    safe_call({:claim, quote_id, claim_token})
+  end
+
+  defp safe_call(request) do
+    GenServer.call(__MODULE__, request)
+  catch
+    :exit, {:timeout, _} -> {:error, :billing_unavailable}
+    :exit, {:noproc, _} -> {:error, :billing_unavailable}
+    :exit, {:normal, _} -> {:error, :billing_unavailable}
   end
 
   def last_pay_index, do: GenServer.call(__MODULE__, :last_pay_index)
@@ -72,7 +80,10 @@ defmodule ZaptunnelRelay.Payments do
     description = "Zaptunnel connection lease for " <> abbreviate(node_id)
     provider = Application.fetch_env!(:zaptunnel_relay, :invoice_provider)
     claim_token = "zc_" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
-    source_hash = :crypto.mac(:hmac, :sha256, token_secret(), :erlang.term_to_binary(source))
+    aggregated_source = ZaptunnelRelay.RateLimiter.source_key(source)
+
+    source_hash =
+      :crypto.mac(:hmac, :sha256, token_secret(), :erlang.term_to_binary(aggregated_source))
 
     result =
       with :ok <- pending_quote_capacity(state.quotes, source_hash),
@@ -238,11 +249,15 @@ defmodule ZaptunnelRelay.Payments do
   end
 
   defp verify_proof(%{protocol: :mpp, challenge: challenge, preimage: preimage}, quote) do
-    {_header, expected} = PaymentProtocol.mpp_challenge(quote, challenge["realm"])
+    with true <- is_binary(challenge["realm"]) do
+      {_header, expected} = PaymentProtocol.mpp_challenge(quote, challenge["realm"])
 
-    if challenge == expected,
-      do: verify_preimage(preimage, quote),
-      else: {:error, :challenge_mismatch}
+      if challenge == expected,
+        do: verify_preimage(preimage, quote),
+        else: {:error, :challenge_mismatch}
+    else
+      _invalid -> {:error, :challenge_mismatch}
+    end
   end
 
   defp verify_proof(%{protocol: :l402, token: token, preimage: preimage}, quote) do

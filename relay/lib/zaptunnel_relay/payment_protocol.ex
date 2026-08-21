@@ -1,7 +1,7 @@
 defmodule ZaptunnelRelay.PaymentProtocol do
   @moduledoc false
 
-  def mpp_challenge(quote, realm) do
+  def mpp_challenge(quote, realm) when is_binary(realm) do
     request =
       encode(%{
         "amount" => Integer.to_string(quote.amount_sats),

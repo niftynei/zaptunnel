@@ -23,7 +23,7 @@
       src = pkgs.lib.cleanSource ./relay;
       mixFodDeps = pkgs.beamPackages.fetchMixDeps {
         inherit pname version src;
-        hash = "sha256-349KseHrYKUguXIhV0scIqsZPWwKD87gCqZUHmTtX+M=";
+        hash = "sha256-QhvqVDiz0ajkGNn1dWLWvzbTxdDuLYliAy19C2xg60A=";
       };
     in {
       inherit pname version src mixFodDeps;
@@ -194,7 +194,35 @@
         pkgs.runCommand "zaptunnel-alert-rules" {
           nativeBuildInputs = [pkgs.prometheus.cli];
         } ''
-          promtool check rules ${./nix/alerts/zaptunnel.yml}
+          cp ${./nix/alerts/zaptunnel.yml} zaptunnel.yml
+          cp ${pkgs.writeText "zaptunnel-alert-tests.yml" ''
+            rule_files:
+              - zaptunnel.yml
+
+            evaluation_interval: 1m
+
+            tests:
+              - name: session capacity alert matches differently-labelled gauges
+                interval: 1m
+                input_series:
+                  - series: 'zaptunnel_sessions{job="zapptunnel",state="total"}'
+                    values: '9000+0x15'
+                  - series: 'zaptunnel_session_capacity{job="zapptunnel"}'
+                    values: '10000+0x15'
+                alert_rule_test:
+                  - eval_time: 11m
+                    alertname: ZaptunnelSessionCapacityHigh
+                    exp_alerts:
+                      - exp_labels:
+                          job: zapptunnel
+                          severity: warning
+                          state: total
+                        exp_annotations:
+                          summary: Relay session capacity is above 80 percent
+                          description: Pending and active sessions are approaching the configured global limit.
+          ''} zaptunnel.test.yml
+          promtool check rules zaptunnel.yml
+          promtool test rules zaptunnel.test.yml
           touch "$out"
         '';
     });

@@ -42,7 +42,7 @@ groups:
           description: More than half of recent endpoint checks are failing with meaningful traffic volume.
 
       - alert: ZaptunnelSessionCapacityHigh
-        expr: zaptunnel_sessions{job="zapptunnel",state="total"} / zaptunnel_session_capacity{job="zapptunnel"} > 0.8
+        expr: zaptunnel_sessions{job="zapptunnel",state="total"} / on(job) group_left zaptunnel_session_capacity{job="zapptunnel"} > 0.8
         for: 10m
         labels:
           severity: warning
