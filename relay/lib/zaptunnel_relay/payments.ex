@@ -3,20 +3,12 @@ defmodule ZaptunnelRelay.Payments do
 
   use GenServer
 
-  alias ZaptunnelRelay.PaymentProtocol
-
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   def enabled?, do: Application.fetch_env!(:zaptunnel_relay, :payments_enabled)
 
   def challenge(node_id, realm, source \\ nil) do
     GenServer.call(__MODULE__, {:challenge, node_id, realm, source}, payment_timeout())
-  end
-
-  def redeem(authorization, node_id) do
-    with {:ok, proof} <- PaymentProtocol.parse_credential(authorization) do
-      safe_call({:redeem, proof, node_id})
-    end
   end
 
   def authorize_lease(token, node_id) do
@@ -73,11 +65,10 @@ defmodule ZaptunnelRelay.Payments do
   def terminate(_reason, %{table: table}), do: :dets.close(table)
 
   @impl true
-  def handle_call({:challenge, node_id, realm, source}, _from, state) do
+  def handle_call({:challenge, node_id, _realm, source}, _from, state) do
     id = random_id("zq_")
     amount_sats = Application.fetch_env!(:zaptunnel_relay, :payment_price_sats)
     ttl_ms = Application.fetch_env!(:zaptunnel_relay, :payment_quote_ttl_ms)
-    description = "Zaptunnel connection lease for " <> abbreviate(node_id)
     provider = Application.fetch_env!(:zaptunnel_relay, :invoice_provider)
     claim_token = "zc_" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     aggregated_source = ZaptunnelRelay.RateLimiter.source_key(source)
@@ -90,7 +81,6 @@ defmodule ZaptunnelRelay.Payments do
            {:ok, invoice} <-
              provider.create_invoice(
                amount_sats: amount_sats,
-               description: description,
                expiry_seconds: div(ttl_ms, 1_000),
                label: id
              ),
@@ -101,10 +91,9 @@ defmodule ZaptunnelRelay.Payments do
           id: id,
           node_id: node_id,
           amount_sats: amount_sats,
-          description: description,
           invoice: invoice.invoice,
           payment_hash: String.downcase(invoice.payment_hash),
-          network: Application.fetch_env!(:zaptunnel_relay, :payment_network),
+          offer_id: invoice.offer_id,
           expires_at: expires_at,
           claim_token_hash: :crypto.hash(:sha256, claim_token),
           source_hash: source_hash,
@@ -112,29 +101,16 @@ defmodule ZaptunnelRelay.Payments do
           redeemed: nil
         }
 
-        l402_token =
-          sign(%{
-            "expires_at" => expires_at,
-            "payment_hash" => quote.payment_hash,
-            "quote_id" => id,
-            "type" => "quote"
-          })
-
-        {mpp_header, mpp_challenge} = PaymentProtocol.mpp_challenge(quote, realm)
-
         response = %{
           amount_sats: amount_sats,
           claim_path: "/v1/payments/#{id}/claim",
           claim_token: claim_token,
           expires_at: expires_at,
           invoice: quote.invoice,
-          l402_token: l402_token,
-          mpp_challenge: mpp_challenge,
           payment_hash: quote.payment_hash,
-          protocols: ["mpp", "l402"],
+          protocol: "bolt12",
           quote_id: id,
-          retry_after_ms: Application.fetch_env!(:zaptunnel_relay, :payment_claim_poll_ms),
-          www_authenticate: [mpp_header, PaymentProtocol.l402_challenge(quote, l402_token)]
+          retry_after_ms: Application.fetch_env!(:zaptunnel_relay, :payment_claim_poll_ms)
         }
 
         {:ok, quote, response}
@@ -151,33 +127,6 @@ defmodule ZaptunnelRelay.Payments do
       {:error, reason} ->
         ZaptunnelRelay.Telemetry.emit([:payment, :challenge], %{count: 1}, %{result: :error})
         {:reply, {:error, safe_reason(reason)}, state}
-    end
-  end
-
-  def handle_call({:redeem, proof, node_id}, _from, state) do
-    with {:ok, quote_id} <- proof_quote_id(proof),
-         {:ok, quote} <- fetch_quote(state.quotes, quote_id),
-         :ok <- verify_proof(proof, quote),
-         :ok <- same_node(quote, node_id),
-         :ok <- unexpired(quote.expires_at),
-         {:ok, lease, quote} <- quote |> mark_settled() |> redeem_quote() do
-      quotes = Map.put(state.quotes, quote.id, quote)
-      persist(state.table, quote)
-
-      ZaptunnelRelay.Telemetry.emit([:payment, :redeem], %{count: 1}, %{
-        protocol: proof.protocol,
-        result: :ok
-      })
-
-      {:reply, {:ok, lease, PaymentProtocol.receipt(quote)}, %{state | quotes: quotes}}
-    else
-      {:error, reason} ->
-        ZaptunnelRelay.Telemetry.emit([:payment, :redeem], %{count: 1}, %{
-          protocol: proof.protocol,
-          result: :error
-        })
-
-        {:reply, {:error, reason}, state}
     end
   end
 
@@ -242,47 +191,6 @@ defmodule ZaptunnelRelay.Payments do
     {:noreply, %{state | watcher_healthy_at: nil}}
   end
 
-  defp proof_quote_id(%{protocol: :mpp, quote_id: id}), do: {:ok, id}
-
-  defp proof_quote_id(%{protocol: :l402, token: token}) do
-    with {:ok, %{"quote_id" => id, "type" => "quote"}} <- verify(token), do: {:ok, id}
-  end
-
-  defp verify_proof(%{protocol: :mpp, challenge: challenge, preimage: preimage}, quote) do
-    with true <- is_binary(challenge["realm"]) do
-      {_header, expected} = PaymentProtocol.mpp_challenge(quote, challenge["realm"])
-
-      if challenge == expected,
-        do: verify_preimage(preimage, quote),
-        else: {:error, :challenge_mismatch}
-    else
-      _invalid -> {:error, :challenge_mismatch}
-    end
-  end
-
-  defp verify_proof(%{protocol: :l402, token: token, preimage: preimage}, quote) do
-    with {:ok, payload} <- verify(token),
-         true <- payload["quote_id"] == quote.id,
-         true <- payload["payment_hash"] == quote.payment_hash do
-      verify_preimage(preimage, quote)
-    else
-      _invalid -> {:error, :invalid_payment_token}
-    end
-  end
-
-  defp verify_preimage(preimage, quote) when is_binary(preimage) do
-    with {:ok, bytes} <- Base.decode16(preimage, case: :lower),
-         true <- byte_size(bytes) == 32,
-         {:ok, expected} <- Base.decode16(quote.payment_hash, case: :lower),
-         true <- Plug.Crypto.secure_compare(:crypto.hash(:sha256, bytes), expected) do
-      :ok
-    else
-      _invalid -> {:error, :invalid_preimage}
-    end
-  end
-
-  defp verify_preimage(_preimage, _quote), do: {:error, :invalid_preimage}
-
   defp verify_claim_token(token, %{claim_token_hash: expected}) when is_binary(token) do
     supplied = :crypto.hash(:sha256, token)
 
@@ -323,9 +231,6 @@ defmodule ZaptunnelRelay.Payments do
     System.monotonic_time(:millisecond) - timestamp <= max_age
   end
 
-  defp mark_settled(%{settled_at: settled_at} = quote) when is_integer(settled_at), do: quote
-  defp mark_settled(quote), do: Map.put(quote, :settled_at, System.system_time(:second))
-
   defp redeem_quote(%{redeemed: lease} = quote) when is_map(lease) do
     if lease.expires_at >= System.system_time(:second),
       do: {:ok, lease, quote},
@@ -363,12 +268,13 @@ defmodule ZaptunnelRelay.Payments do
     with %{
            pay_index: pay_index,
            label: label,
+           offer_id: offer_id,
            payment_hash: payment_hash,
            amount_received_msat: amount_received_msat,
            paid_at: paid_at
          }
          when is_integer(pay_index) and pay_index > state.last_pay_index and
-                is_binary(label) and is_binary(payment_hash) and
+                is_binary(label) and is_binary(offer_id) and is_binary(payment_hash) and
                 is_integer(amount_received_msat) and is_integer(paid_at) <- payment do
       case Map.fetch(state.quotes, label) do
         {:ok, quote} ->
@@ -419,7 +325,8 @@ defmodule ZaptunnelRelay.Payments do
 
   defp valid_settlement?(payment, quote),
     do:
-      payment.payment_hash == quote.payment_hash and
+      payment.offer_id == quote[:offer_id] and
+        payment.payment_hash == quote.payment_hash and
         payment.amount_received_msat >= quote.amount_sats * 1_000
 
   defp advance_cursor(state, pay_index) do
@@ -427,19 +334,28 @@ defmodule ZaptunnelRelay.Payments do
     %{state | last_pay_index: pay_index}
   end
 
-  defp same_node(%{node_id: node_id}, node_id), do: :ok
-  defp same_node(_quote, _node_id), do: {:error, :lease_node_mismatch}
-
   defp unexpired(expires_at) when is_integer(expires_at) do
     if expires_at >= System.system_time(:second), do: :ok, else: {:error, :payment_expired}
   end
 
   defp unexpired(_expires_at), do: {:error, :payment_expired}
 
-  defp validate_invoice(%{invoice: invoice, payment_hash: hash, expires_at: expiry})
-       when is_binary(invoice) and is_binary(hash) and byte_size(hash) == 64 and
-              is_integer(expiry),
-       do: :ok
+  defp validate_invoice(%{
+         invoice: "lni" <> _invoice,
+         payment_hash: hash,
+         offer_id: offer_id,
+         expires_at: expiry
+       })
+       when is_binary(hash) and byte_size(hash) == 64 and is_binary(offer_id) and
+              byte_size(offer_id) == 64 and is_integer(expiry) do
+    with {:ok, decoded_hash} <- Base.decode16(hash, case: :mixed),
+         {:ok, decoded_offer_id} <- Base.decode16(offer_id, case: :mixed),
+         true <- byte_size(decoded_hash) == 32 and byte_size(decoded_offer_id) == 32 do
+      :ok
+    else
+      _invalid -> {:error, :invalid_invoice_response}
+    end
+  end
 
   defp validate_invoice(_invoice), do: {:error, :invalid_invoice_response}
 
@@ -458,7 +374,7 @@ defmodule ZaptunnelRelay.Payments do
   end
 
   defp sign(payload) do
-    encoded = PaymentProtocol.encode(payload)
+    encoded = payload |> Jason.encode!() |> Base.url_encode64(padding: false)
 
     signature =
       :crypto.mac(:hmac, :sha256, token_secret(), encoded) |> Base.url_encode64(padding: false)
@@ -532,14 +448,6 @@ defmodule ZaptunnelRelay.Payments do
 
   defp random_id(prefix),
     do: prefix <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
-
-  defp abbreviate(
-         <<prefix::binary-size(8), _::binary-size(50), suffix::binary-size(8)>> = node_id
-       ) do
-    if String.match?(node_id, ~r/\A(?:02|03)[0-9a-fA-F]{64}\z/),
-      do: prefix <> "…" <> suffix,
-      else: "invalid"
-  end
 
   defp safe_reason(reason) when is_atom(reason), do: reason
   defp safe_reason(_reason), do: :billing_unavailable

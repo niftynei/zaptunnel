@@ -41,15 +41,46 @@ unless config_env() == :test do
   payment_token_secret = System.get_env("ZAPTUNNEL_PAYMENT_TOKEN_SECRET")
   billing_node_id = System.get_env("ZAPTUNNEL_BILLING_NODE_ID")
   billing_node_address = System.get_env("ZAPTUNNEL_BILLING_NODE_ADDRESS")
-  billing_node_rune = System.get_env("ZAPTUNNEL_BILLING_NODE_RUNE")
+  billing_fetch_rune = System.get_env("ZAPTUNNEL_BILLING_FETCH_RUNE")
+  billing_decode_rune = System.get_env("ZAPTUNNEL_BILLING_DECODE_RUNE")
+  billing_wait_rune = System.get_env("ZAPTUNNEL_BILLING_WAIT_RUNE")
+  billing_commando_private_key = System.get_env("ZAPTUNNEL_BILLING_COMMANDO_PRIVATE_KEY")
+  payment_offer = System.get_env("ZAPTUNNEL_PAYMENT_OFFER")
+  payment_offer_id = System.get_env("ZAPTUNNEL_PAYMENT_OFFER_ID")
 
   if payments_enabled and
        Enum.any?(
-         [payment_token_secret, billing_node_id, billing_node_address, billing_node_rune],
+         [
+           payment_token_secret,
+           billing_node_id,
+           billing_node_address,
+           billing_fetch_rune,
+           billing_decode_rune,
+           billing_wait_rune,
+           billing_commando_private_key,
+           payment_offer,
+           payment_offer_id
+         ],
          &is_nil/1
        ) do
-    raise "payment configuration requires ZAPTUNNEL_PAYMENT_TOKEN_SECRET, ZAPTUNNEL_BILLING_NODE_ID, ZAPTUNNEL_BILLING_NODE_ADDRESS, and ZAPTUNNEL_BILLING_NODE_RUNE"
+    raise "payment configuration requires the token secret, billing node, three restricted runes, static Commando key, and BOLT12 offer settings"
   end
+
+  valid_hex_32? = fn value ->
+    case Base.decode16(value || "", case: :mixed) do
+      {:ok, bytes} -> byte_size(bytes) == 32
+      :error -> false
+    end
+  end
+
+  if payments_enabled and
+       (not String.starts_with?(payment_offer, "lno") or
+          not valid_hex_32?.(payment_offer_id) or
+          not valid_hex_32?.(billing_commando_private_key)) do
+    raise "BOLT12 payments require an lno offer plus 32-byte hex offer ID and Commando private key"
+  end
+
+  payment_offer_id = if payment_offer_id, do: String.downcase(payment_offer_id)
 
   config :zaptunnel_relay,
     ip: ip,
@@ -64,7 +95,8 @@ unless config_env() == :test do
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_PENDING_SESSIONS", "1024")),
     payments_enabled: payments_enabled,
     payment_price_sats: String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_PRICE_SATS", "10")),
-    payment_network: System.get_env("ZAPTUNNEL_PAYMENT_NETWORK", "mainnet"),
+    payment_offer: payment_offer,
+    payment_offer_id: payment_offer_id,
     payment_quote_ttl_ms:
       String.to_integer(System.get_env("ZAPTUNNEL_PAYMENT_QUOTE_TTL_MS", "300000")),
     payment_lease_ttl_ms:
@@ -89,7 +121,10 @@ unless config_env() == :test do
     payment_state_path: System.get_env("ZAPTUNNEL_PAYMENT_STATE_PATH"),
     billing_node_id: billing_node_id,
     billing_node_address: billing_node_address,
-    billing_node_rune: billing_node_rune,
+    billing_fetch_rune: billing_fetch_rune,
+    billing_decode_rune: billing_decode_rune,
+    billing_wait_rune: billing_wait_rune,
+    billing_commando_private_key: billing_commando_private_key,
     max_total_sessions:
       String.to_integer(System.get_env("ZAPTUNNEL_MAX_TOTAL_SESSIONS", "10000")),
     max_pending_sessions_per_node:

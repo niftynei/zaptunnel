@@ -1,7 +1,7 @@
 defmodule ZaptunnelRelay.PaymentsTest do
   use ExUnit.Case, async: false
 
-  alias ZaptunnelRelay.{PaymentProtocol, Payments}
+  alias ZaptunnelRelay.Payments
 
   @preimage String.duplicate("11", 32)
   @payment_hash :crypto.hash(:sha256, Base.decode16!(@preimage, case: :lower))
@@ -17,7 +17,8 @@ defmodule ZaptunnelRelay.PaymentsTest do
       {:ok,
        %{
          expires_at: System.system_time(:second) + 300,
-         invoice: "lnbc10n1testinvoice",
+         invoice: "lni1testinvoice",
+         offer_id: String.duplicate("aa", 32),
          payment_hash: Application.fetch_env!(:zaptunnel_relay, :payments_test_hash)
        }}
     end
@@ -46,14 +47,14 @@ defmodule ZaptunnelRelay.PaymentsTest do
     :ok
   end
 
-  test "offers one invoice through both MPP and L402 adapters" do
+  test "offers a BOLT12 invoice with a protected settlement claim" do
     assert {:ok, challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com")
-    assert challenge.protocols == ["mpp", "l402"]
-    assert challenge.invoice == "lnbc10n1testinvoice"
+    assert challenge.protocol == "bolt12"
+    assert challenge.invoice == "lni1testinvoice"
     assert challenge.payment_hash == @payment_hash
     assert challenge.claim_path == "/v1/payments/#{challenge.quote_id}/claim"
     assert challenge.claim_token =~ ~r/^zc_[A-Za-z0-9_-]{43}$/
-    assert ["Payment " <> _, "L402 " <> _] = challenge.www_authenticate
+    refute Map.has_key?(challenge, :www_authenticate)
     assert_receive {:invoice, opts}
     assert opts[:amount_sats] == 10
   end
@@ -66,6 +67,7 @@ defmodule ZaptunnelRelay.PaymentsTest do
     assert :ok =
              Payments.record_settlement(%{
                label: challenge.quote_id,
+               offer_id: String.duplicate("aa", 32),
                payment_hash: @payment_hash,
                amount_received_msat: 10_000,
                paid_at: System.system_time(:second),
@@ -85,6 +87,7 @@ defmodule ZaptunnelRelay.PaymentsTest do
     assert {:error, :invalid_settlement} =
              Payments.record_settlement(%{
                label: challenge.quote_id,
+               offer_id: String.duplicate("aa", 32),
                payment_hash: String.duplicate("00", 32),
                amount_received_msat: 10_000,
                paid_at: System.system_time(:second),
@@ -126,51 +129,25 @@ defmodule ZaptunnelRelay.PaymentsTest do
     refute_receive {:invoice, _opts}
   end
 
-  test "MPP tokens use canonical JSON and accept optional base64url padding" do
-    assert PaymentProtocol.encode(%{"z" => 1, "a" => 2}) ==
-             Base.url_encode64(~s({"a":2,"z":1}), padding: false)
-
+  test "a settled quote produces one idempotent node-bound lease" do
     assert {:ok, challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com")
 
-    credential =
-      %{
-        "challenge" => challenge.mpp_challenge,
-        "payload" => %{"preimage" => @preimage}
-      }
-      |> PaymentProtocol.encode()
-      |> then(&("Payment " <> &1 <> String.duplicate("=", rem(4 - rem(byte_size(&1), 4), 4))))
+    assert :ok =
+             Payments.record_settlement(%{
+               label: challenge.quote_id,
+               offer_id: String.duplicate("aa", 32),
+               payment_hash: @payment_hash,
+               amount_received_msat: 10_000,
+               paid_at: System.system_time(:second),
+               pay_index: 10
+             })
 
-    assert {:ok, _lease, _receipt} = Payments.redeem(credential, @node_id)
-  end
-
-  test "MPP and L402 normalize to the same idempotent paid lease" do
-    assert {:ok, challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com")
-
-    mpp =
-      "Payment " <>
-        PaymentProtocol.encode(%{
-          "challenge" => challenge.mpp_challenge,
-          "payload" => %{"preimage" => @preimage}
-        })
-
-    assert {:ok, first, receipt} = Payments.redeem(mpp, @node_id)
-    assert is_binary(receipt)
+    assert {:ok, first} = Payments.claim(challenge.quote_id, challenge.claim_token)
+    assert {:ok, second} = Payments.claim(challenge.quote_id, challenge.claim_token)
+    assert second == first
     assert {:ok, first.id} == Payments.authorize_lease(first.token, @node_id)
 
-    l402 = "L402 #{challenge.l402_token}:#{@preimage}"
-    assert {:ok, second, _receipt} = Payments.redeem(l402, @node_id)
-    assert second == first
-  end
-
-  test "rejects incorrect preimages and cross-node leases" do
-    assert {:ok, challenge} = Payments.challenge(@node_id, "relay.zapptunnel.com")
-    credential = "L402 #{challenge.l402_token}:#{String.duplicate("00", 32)}"
-    assert {:error, :invalid_preimage} = Payments.redeem(credential, @node_id)
-
-    valid = "L402 #{challenge.l402_token}:#{@preimage}"
-    assert {:ok, lease, _receipt} = Payments.redeem(valid, @node_id)
-
     assert {:error, :invalid_lease} =
-             Payments.authorize_lease(lease.token, "03" <> String.duplicate("33", 32))
+             Payments.authorize_lease(first.token, "03" <> String.duplicate("33", 32))
   end
 end

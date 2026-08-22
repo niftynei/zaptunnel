@@ -17,8 +17,8 @@ The current vertical slice includes:
 - relay-initiated BOLT-8 endpoint verification with `init` and `ping`/`pong`;
 - deduplicated verification caching and bounded verification concurrency;
 - a three-connection limit per destination node ID;
-- optional application-paid connection leases offered through both MPP
-  Lightning and L402, backed by a restricted Commando billing connection;
+- optional application-paid connection leases using BOLT12 invoices fetched
+  through restricted Commando billing connections;
 - public-address validation, DNS pinning, and v3 onion routing through Tor;
 - request rate limiting and bounded frames;
 - opaque, bidirectional WebSocket-to-TCP forwarding;
@@ -139,19 +139,26 @@ The development-only `ZAPTUNNEL_ALLOW_PRIVATE_ADDRESSES=true` setting must not
 be enabled on a public relay.
 
 Payment support is disabled by default. The NixOS module's `payments` section
-configures the price, lease lifetime, and dedicated CLN billing node. Put only
-the two secrets below in the service's `environmentFile`; never place them in
-`flake.nix` or another Nix-store input:
+configures the price, lease lifetime, reusable BOLT12 offer, and dedicated CLN
+billing node. Put only the secrets below in the service's `environmentFile`;
+never place them in `flake.nix` or another Nix-store input:
 
 ```text
-ZAPTUNNEL_BILLING_NODE_RUNE=<invoice-and-waitanyinvoice-only rune>
+ZAPTUNNEL_BILLING_FETCH_RUNE=<fetchinvoice-only rune, restricted to the configured offer>
+ZAPTUNNEL_BILLING_DECODE_RUNE=<decode-only rune>
+ZAPTUNNEL_BILLING_WAIT_RUNE=<waitanyinvoice-only rune>
+ZAPTUNNEL_BILLING_COMMANDO_PRIVATE_KEY=<stable 32-byte hex Commando key>
 ZAPTUNNEL_PAYMENT_TOKEN_SECRET=<at least 32 random bytes>
 ```
 
 The relay connects directly to the configured billing node over BOLT-8 and
-uses Commando to call `invoice` and run one cursor-based `waitanyinvoice`
-settlement watcher. Browsers poll a protected relay claim endpoint; the relay
-does not create one CLN waiter per browser or route billing through itself.
+uses Commando to fetch an invoice from the configured offer, validate it, and
+run one cursor-based `waitanyinvoice` settlement watcher. Each rune should be
+bound to the public key derived from the stable Commando key. Because
+`waitanyinvoice` is node-wide, the relay additionally requires the configured
+offer ID, opaque quote payer note, payment hash, and amount to match. Browsers
+poll a protected relay claim endpoint; the relay does not create one CLN waiter
+per browser or route billing through itself.
 
 See [the architecture](docs/architecture.md) and
 [Nix deployment notes](docs/nix.md) for the current design boundaries.

@@ -94,15 +94,6 @@ defmodule ZaptunnelRelay.Router do
         {:ok, ticket} ->
           json(conn, 201, %{websocket_path: "/v1/connect/#{ticket}"})
 
-        {:ok, ticket, lease, receipt} ->
-          conn
-          |> put_resp_header("payment-receipt", receipt)
-          |> json(201, %{
-            lease: lease.token,
-            lease_expires_at: lease.expires_at,
-            websocket_path: "/v1/connect/#{ticket}"
-          })
-
         {:payment_required, challenge} ->
           payment_required(conn, challenge)
 
@@ -122,15 +113,7 @@ defmodule ZaptunnelRelay.Router do
           json(conn, 401, %{error: Atom.to_string(reason)})
 
         {:error, reason}
-        when reason in [
-               :malformed_payment_credential,
-               :unsupported_payment_credential,
-               :invalid_payment_token,
-               :invalid_preimage,
-               :unknown_challenge,
-               :challenge_mismatch,
-               :payment_expired
-             ] ->
+        when reason in [:invalid_payment_token, :unknown_challenge, :payment_expired] ->
           json(conn, 402, %{error: Atom.to_string(reason)})
 
         {:error, :billing_unavailable} ->
@@ -232,10 +215,7 @@ defmodule ZaptunnelRelay.Router do
       "access-control-allow-headers",
       "authorization,content-type,x-zaptunnel-lease"
     )
-    |> put_resp_header(
-      "access-control-expose-headers",
-      "payment-receipt,www-authenticate,x-request-id"
-    )
+    |> put_resp_header("access-control-expose-headers", "x-request-id")
     |> put_resp_header("access-control-allow-methods", "GET,POST,OPTIONS")
   end
 
@@ -411,7 +391,6 @@ defmodule ZaptunnelRelay.Router do
 
   defp admit(conn, node_id, address, request_id) do
     lease = get_req_header(conn, "x-zaptunnel-lease") |> List.first()
-    authorization = get_req_header(conn, "authorization") |> List.first()
 
     cond do
       is_binary(lease) and ZaptunnelRelay.Payments.enabled?() ->
@@ -421,17 +400,6 @@ defmodule ZaptunnelRelay.Router do
             paid_lease: lease_id,
             source: conn.remote_ip
           )
-        end
-
-      is_binary(authorization) and ZaptunnelRelay.Payments.enabled?() ->
-        with {:ok, paid_lease, receipt} <- ZaptunnelRelay.Payments.redeem(authorization, node_id),
-             {:ok, ticket} <-
-               ZaptunnelRelay.Admission.issue(node_id, address,
-                 request_id: request_id,
-                 paid_lease: paid_lease.id,
-                 source: conn.remote_ip
-               ) do
-          {:ok, ticket, paid_lease, receipt}
         end
 
       true ->
@@ -456,10 +424,7 @@ defmodule ZaptunnelRelay.Router do
   end
 
   defp payment_required(conn, challenge) do
-    headers = Enum.map(challenge.www_authenticate, &{"www-authenticate", &1})
-
     conn
-    |> prepend_resp_headers(headers)
     |> put_resp_header("cache-control", "no-store")
     |> json(402, %{
       amount_sats: challenge.amount_sats,
@@ -468,10 +433,8 @@ defmodule ZaptunnelRelay.Router do
       error: "payment_required",
       expires_at: challenge.expires_at,
       invoice: challenge.invoice,
-      l402_token: challenge.l402_token,
-      mpp_challenge: challenge.mpp_challenge,
       payment_hash: challenge.payment_hash,
-      payment_protocols: challenge.protocols,
+      protocol: challenge.protocol,
       quote_id: challenge.quote_id,
       retry_after_ms: challenge.retry_after_ms
     })
@@ -483,20 +446,12 @@ defmodule ZaptunnelRelay.Router do
   defp parse_claim_authorization(_authorization), do: {:error, :invalid_claim_token}
 
   defp result_tag({:ok, _ticket}), do: :ok
-  defp result_tag({:ok, _ticket, _lease, _receipt}), do: :ok
   defp result_tag({:payment_required, _challenge}), do: {:error, :payment_required}
   defp result_tag({:error, reason}), do: {:error, reason}
 
   defp log_admission(request_id, {:ok, _ticket}, node_id, address) do
     Logger.info(
       "admission accepted request_id=#{request_id} node_id=#{abbreviate_node_id(node_id)} " <>
-        "submitted_address=#{inspect_submitted(address)}"
-    )
-  end
-
-  defp log_admission(request_id, {:ok, _ticket, _lease, _receipt}, node_id, address) do
-    Logger.info(
-      "paid admission accepted request_id=#{request_id} node_id=#{abbreviate_node_id(node_id)} " <>
         "submitted_address=#{inspect_submitted(address)}"
     )
   end

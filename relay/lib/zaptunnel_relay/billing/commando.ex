@@ -22,7 +22,12 @@ defmodule ZaptunnelRelay.Billing.Commando do
            ),
          {:ok, socket} <- Dialer.connect(target, timeout: remaining(deadline)) do
       try do
-        with {:ok, transport} <- Bolt8.handshake(socket, node_id, timeout: remaining(deadline)),
+        with {:ok, transport} <-
+               Bolt8.handshake(
+                 socket,
+                 node_id,
+                 handshake_options(opts, remaining(deadline))
+               ),
              {:ok, transport} <- Bolt8.send_message(socket, @init, transport),
              {:ok, transport} <- await_init(socket, transport, deadline, @max_messages),
              request_id <- :crypto.strong_rand_bytes(8),
@@ -108,4 +113,11 @@ defmodule ZaptunnelRelay.Billing.Commando do
   end
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 1)
+
+  defp handshake_options(opts, timeout) do
+    case Keyword.fetch(opts, :static_private) do
+      {:ok, static_private} -> [timeout: timeout, static_private: static_private]
+      :error -> [timeout: timeout]
+    end
+  end
 end

@@ -132,18 +132,12 @@ in {
     };
 
     payments = {
-      enable = lib.mkEnableOption "MPP and L402 Lightning payments for additional connections";
+      enable = lib.mkEnableOption "BOLT12 Lightning payments for additional connections";
 
       priceSats = lib.mkOption {
         type = lib.types.ints.positive;
         default = 10;
         description = "Price of one additional reconnect-safe connection lease, in satoshis.";
-      };
-
-      network = lib.mkOption {
-        type = lib.types.enum ["mainnet" "regtest" "signet"];
-        default = "mainnet";
-        description = "Lightning network advertised in MPP payment challenges.";
       };
 
       quoteTtlSeconds = lib.mkOption {
@@ -199,6 +193,18 @@ in {
         default = null;
         example = "billing.example.com:9735";
         description = "Lightning peer address used for direct BOLT-8 Commando billing RPC.";
+      };
+
+      offer = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Reusable fixed-amount BOLT12 offer used for connection leases.";
+      };
+
+      offerId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Expected 32-byte hex offer ID returned by invoices and settlements.";
       };
     };
 
@@ -277,8 +283,16 @@ in {
           message = "services.zaptunnel-relay.payments.billingNodeAddress is required when payments are enabled";
         }
         {
+          assertion = !cfg.payments.enable || cfg.payments.offer != null;
+          message = "services.zaptunnel-relay.payments.offer is required when payments are enabled";
+        }
+        {
+          assertion = !cfg.payments.enable || cfg.payments.offerId != null;
+          message = "services.zaptunnel-relay.payments.offerId is required when payments are enabled";
+        }
+        {
           assertion = !cfg.payments.enable || cfg.environmentFile != null;
-          message = "payments require environmentFile containing ZAPTUNNEL_BILLING_NODE_RUNE and ZAPTUNNEL_PAYMENT_TOKEN_SECRET";
+          message = "payments require environmentFile containing the fetch, decode, and wait runes, ZAPTUNNEL_BILLING_COMMANDO_PRIVATE_KEY, and ZAPTUNNEL_PAYMENT_TOKEN_SECRET";
         }
       ];
 
@@ -335,7 +349,6 @@ in {
           // lib.optionalAttrs cfg.payments.enable {
             ZAPTUNNEL_PAYMENTS_ENABLED = "true";
             ZAPTUNNEL_PAYMENT_PRICE_SATS = toString cfg.payments.priceSats;
-            ZAPTUNNEL_PAYMENT_NETWORK = cfg.payments.network;
             ZAPTUNNEL_PAYMENT_QUOTE_TTL_MS = toString (cfg.payments.quoteTtlSeconds * 1000);
             ZAPTUNNEL_PAYMENT_LEASE_TTL_MS = toString (cfg.payments.leaseTtlSeconds * 1000);
             ZAPTUNNEL_PAYMENT_CLAIM_GRACE_MS = toString (cfg.payments.claimGraceSeconds * 1000);
@@ -346,6 +359,8 @@ in {
             ZAPTUNNEL_PAYMENT_STATE_PATH = "/var/lib/zaptunnel-relay/payments.dets";
             ZAPTUNNEL_BILLING_NODE_ID = cfg.payments.billingNodeId;
             ZAPTUNNEL_BILLING_NODE_ADDRESS = cfg.payments.billingNodeAddress;
+            ZAPTUNNEL_PAYMENT_OFFER = cfg.payments.offer;
+            ZAPTUNNEL_PAYMENT_OFFER_ID = cfg.payments.offerId;
           }
           // cfg.environment;
 

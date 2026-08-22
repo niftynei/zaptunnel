@@ -66,9 +66,9 @@ depending on optional methods.
 ## Paid connection leases
 
 The public relay allows three concurrent free connections to a destination
-node. When those slots are occupied, it can offer the same BOLT11 invoice as
-both an MPP Lightning `charge` challenge and an L402 challenge. Supply a wallet
-adapter to pay from the application side:
+node. When those slots are occupied, it returns a BOLT12 invoice fetched from
+the relay's reusable offer. Supply a wallet adapter to pay from the application
+side:
 
 ```ts
 const node = createConnectionManager({
@@ -76,25 +76,22 @@ const node = createConnectionManager({
   address,
   rune,
   payment: {
-    protocol: "auto", // prefers MPP; "mpp" and "l402" are also accepted
     payInvoice: async (challenge) => {
       showPrice(`${challenge.amountSats} sats`);
-      const result = await wallet.sendPayment(challenge.invoice);
-      return result.preimage;
+      await wallet.sendPayment(challenge.invoice);
     }
   }
 });
 ```
 
-When the wallet returns a 32-byte payment preimage, the SDK immediately redeems
-it through the selected MPP or L402 envelope. The SDK never receives wallet
-keys. After the relay verifies payment, it returns a paid lease and the
+The SDK never receives wallet keys or sends a payment preimage to the relay.
+Instead, it polls a protected claim while the relay observes settlement on its
+billing node. After verification, the relay returns a paid lease and the
 connection manager automatically uses that lease for later transport reconnects
 without paying again. A lease permits one concurrent logical connection and
 expires according to the relay's quoted terms.
 
-External wallets and QR flows can return `void`. The SDK then polls the relay,
-which observes settlement on its billing CLN node:
+External wallets and QR flows use the same settlement path:
 
 ```ts
 let pendingClaim;
@@ -106,7 +103,6 @@ const node = createConnectionManager({
   payment: {
     payInvoice: async (challenge) => {
       showLightningQr(challenge.invoice);
-      // No preimage is available in this browser.
     },
     store: {
       loadClaim: () => pendingClaim,
@@ -127,11 +123,9 @@ Without `payment.payInvoice`, admission throws
 `ZaptunnelPaymentRequiredError`. Its safe `challenge` property contains no
 claim secret and can be rendered as a QR code or passed to a payment UI.
 
-The HTTP envelopes follow the evolving
-[MPP Lightning charge draft](https://paymentauth.org/draft-lightning-charge-00.html)
-and the [L402 protocol](https://docs.lightning.engineering/the-lightning-network/l402/protocol-specification).
-Both formats redeem the same relay quote and produce the same scoped lease; they
-do not create separate products or prices.
+The invoice is BOLT12-only. The relay binds each fetched invoice to its opaque
+quote ID and verifies settlement against the configured offer before issuing a
+scoped lease.
 
 ## Resilient connections
 
@@ -354,7 +348,6 @@ RPC `method`, CLN numeric `rpcCode`, and optional `data`.
 | `transport_resource_limit` | Partial Commando responses exceeded the SDK memory budget |
 | `payment_required` | Free slots are occupied and the relay offered a Lightning invoice |
 | `payment_failed` | The application wallet did not complete payment |
-| `invalid_preimage` | The supplied payment proof does not match the invoice |
 | `payment_expired` | An external-wallet invoice was not observed as paid before its grace period ended |
 | `invalid_claim` | A saved external-wallet claim secret is invalid or no longer exists |
 | `payment_status_unavailable` | The relay cannot currently reconcile settlement with its billing node |

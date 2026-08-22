@@ -160,14 +160,12 @@ export type ZaptunnelIdentityStore = {
   savePrivateKey(nodeId: string, privateKey: string): void | Promise<void>;
 };
 
-export type ZaptunnelPaymentProtocol = "auto" | "mpp" | "l402";
-
 export type ZaptunnelPaymentChallenge = {
   amountSats: number;
   expiresAt: number;
   invoice: string;
   paymentHash: string;
-  protocols: readonly ("mpp" | "l402")[];
+  protocol: "bolt12";
   quoteId: string;
 };
 
@@ -193,14 +191,12 @@ export type ZaptunnelPaymentStore = {
 export type ZaptunnelPaymentStatus = "paying" | "waiting_settlement" | "settled";
 
 export type ZaptunnelPaymentOptions = {
-  /** Preferred HTTP payment envelope. Auto prefers MPP and falls back to L402. */
-  protocol?: ZaptunnelPaymentProtocol;
   /**
-   * Pay or display the BOLT11 invoice. Return its preimage for immediate MPP/L402
-   * redemption, or return void when an external wallet will pay it.
+   * Pay or display the BOLT12 invoice. Settlement is verified by the relay, so
+   * any return value from the wallet is ignored.
    */
-  payInvoice(challenge: ZaptunnelPaymentChallenge): Promise<string | void>;
-  /** Optional durable recovery for external-wallet claims and page reloads. */
+  payInvoice(challenge: ZaptunnelPaymentChallenge): Promise<unknown>;
+  /** Optional durable recovery for pending claims and page reloads. */
   store?: ZaptunnelPaymentStore;
   onStatus?(status: ZaptunnelPaymentStatus, challenge: ZaptunnelPaymentChallenge): void;
 };
@@ -413,13 +409,6 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     retryable: true,
     suggestions: ["Check the wallet result and request a fresh payment challenge if necessary."]
   },
-  invalid_preimage: {
-    stage: "relay_admission",
-    title: "Invalid payment proof",
-    summary: "The supplied preimage does not prove payment of this connection invoice.",
-    retryable: false,
-    suggestions: ["Use the preimage returned by the wallet that paid this exact invoice."]
-  },
   payment_expired: {
     stage: "relay_admission",
     title: "Payment claim expired",
@@ -461,13 +450,6 @@ const TROUBLESHOOTING: Readonly<Record<string, TroubleshootingDefinition>> = Obj
     summary: "The supplied paid lease is not valid for this destination node.",
     retryable: false,
     suggestions: ["Use the lease only with the node for which it was purchased."]
-  },
-  unsupported_payment_protocol: {
-    stage: "relay_admission",
-    title: "Payment protocol unavailable",
-    summary: "The relay did not offer the application's selected payment challenge format.",
-    retryable: false,
-    suggestions: ["Use payment protocol auto, MPP, or L402 according to the relay response."]
   },
   lease_in_use: {
     stage: "relay_admission",
@@ -1705,10 +1687,8 @@ async function requestAdmission(
     error?: string;
     expires_at?: number;
     invoice?: string;
-    l402_token?: string;
-    mpp_challenge?: Record<string, unknown>;
     payment_hash?: string;
-    payment_protocols?: string[];
+    protocol?: string;
     quote_id?: string;
     retry_after_ms?: number;
   };
@@ -1785,9 +1765,8 @@ async function requestAdmission(
     await options.payment.store?.saveClaim(options.nodeId.toLowerCase(), issuedClaim);
     options.payment.onStatus?.("paying", challenge);
 
-    let paymentResult: string | void;
     try {
-      paymentResult = await options.payment.payInvoice(challenge);
+      await options.payment.payInvoice(challenge);
     } catch (error) {
       throw new ZaptunnelError("the wallet did not complete the connection payment", {
         code: "payment_failed",
@@ -1796,42 +1775,10 @@ async function requestAdmission(
       });
     }
 
-    if (paymentResult === undefined) {
-      options.payment.onStatus?.("waiting_settlement", challenge);
-      const claimed = await pollPaymentClaim(issuedClaim, options.signal, fetcher);
-      options.payment.onStatus?.("settled", challenge);
-      attempt = await send(undefined, claimed.lease);
-    } else {
-      const preimage = paymentResult.toLowerCase();
-
-      if (!/^[0-9a-f]{64}$/.test(preimage)) {
-        throw new ZaptunnelError("the wallet returned an invalid payment preimage", {
-          code: "invalid_preimage",
-          requestId
-        });
-      }
-
-      const protocol = selectPaymentProtocol(options.payment.protocol ?? "auto", challenge.protocols);
-      const authorization =
-        protocol === "mpp"
-          ? `Payment ${encodeBase64UrlJson({
-              challenge: attempt.body.mpp_challenge,
-              payload: { preimage }
-            })}`
-          : `L402 ${attempt.body.l402_token}:${preimage}`;
-
-      try {
-        attempt = await send(authorization);
-      } catch (error) {
-        throw new ZaptunnelError("could not redeem the connection payment", {
-          code: "relay_unreachable",
-          requestId,
-          cause: error
-        });
-      }
-
-      if (attempt.response.ok) options.payment.onStatus?.("settled", challenge);
-    }
+    options.payment.onStatus?.("waiting_settlement", challenge);
+    const claimed = await pollPaymentClaim(issuedClaim, options.signal, fetcher);
+    options.payment.onStatus?.("settled", challenge);
+    attempt = await send(undefined, claimed.lease);
   }
 
   return parseAdmissionAttempt(attempt, relay);
@@ -1896,21 +1843,18 @@ function parsePaymentChallenge(body: {
   expires_at?: number;
   invoice?: string;
   payment_hash?: string;
-  payment_protocols?: string[];
+  protocol?: string;
   quote_id?: string;
 }): ZaptunnelPaymentChallenge {
-  const protocols = body.payment_protocols?.filter(
-    (protocol): protocol is "mpp" | "l402" => protocol === "mpp" || protocol === "l402"
-  );
-
   if (
     !Number.isSafeInteger(body.amount_sats) ||
     (body.amount_sats ?? 0) <= 0 ||
     !Number.isSafeInteger(body.expires_at) ||
     typeof body.invoice !== "string" ||
+    !body.invoice.startsWith("lni") ||
     !/^[0-9a-f]{64}$/.test(body.payment_hash ?? "") ||
     typeof body.quote_id !== "string" ||
-    !protocols?.length
+    body.protocol !== "bolt12"
   ) {
     throw new ZaptunnelError("the relay returned an invalid payment challenge", {
       code: "invalid_relay_response",
@@ -1923,7 +1867,7 @@ function parsePaymentChallenge(body: {
     expiresAt: body.expires_at!,
     invoice: body.invoice,
     paymentHash: body.payment_hash!,
-    protocols: Object.freeze(protocols),
+    protocol: "bolt12",
     quoteId: body.quote_id
   });
 }
@@ -2069,45 +2013,6 @@ async function waitForPaymentPoll(delayMs: number, signal?: AbortSignal): Promis
       reject(new ZaptunnelError("payment settlement polling was aborted", { code: "request_aborted" }));
     }
   });
-}
-
-function selectPaymentProtocol(
-  preferred: ZaptunnelPaymentProtocol,
-  supported: readonly ("mpp" | "l402")[]
-): "mpp" | "l402" {
-  if (preferred !== "auto" && supported.includes(preferred)) return preferred;
-  if (preferred !== "auto") {
-    throw new ZaptunnelError(`the relay does not offer ${preferred} payment challenges`, {
-      code: "unsupported_payment_protocol"
-    });
-  }
-  if (supported.includes("mpp")) return "mpp";
-  if (supported.includes("l402")) return "l402";
-  throw new ZaptunnelError("the relay does not offer a supported payment protocol", {
-    code: "unsupported_payment_protocol"
-  });
-}
-
-function encodeBase64UrlJson(value: unknown): string {
-  const bytes = new TextEncoder().encode(canonicalJson(value));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    const encoded = JSON.stringify(value);
-    if (encoded === undefined) throw new TypeError("value is not JSON serializable");
-    return encoded;
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-
-  const object = value as Record<string, unknown>;
-  return `{${Object.keys(object)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
-    .join(",")}}`;
 }
 
 export function parseAddress(address: string): { host: string; port: number } {

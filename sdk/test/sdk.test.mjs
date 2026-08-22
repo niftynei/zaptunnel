@@ -603,9 +603,9 @@ test("payment-required admission exposes a typed challenge without invoking a wa
         claim_token: `zc_${"a".repeat(43)}`,
         error: "payment_required",
         expires_at: 2_000_000_000,
-        invoice: "lnbc10n1test",
+        invoice: "lni1test",
         payment_hash: paymentHash,
-        payment_protocols: ["mpp", "l402"],
+        protocol: "bolt12",
         quote_id: "zq_test"
       }),
       { status: 402, headers: { "content-type": "application/json" } }
@@ -616,87 +616,15 @@ test("payment-required admission exposes a typed challenge without invoking a wa
       connect({ nodeId, address: "node.example.com:9735", rune: "readonly" }),
       (error) =>
         error instanceof ZaptunnelPaymentRequiredError &&
-        error.challenge.invoice === "lnbc10n1test" &&
-        error.challenge.protocols.includes("mpp")
+        error.challenge.invoice === "lni1test" &&
+        error.challenge.protocol === "bolt12"
     );
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-for (const protocol of ["mpp", "l402"]) {
-  test(`SDK redeems a ${protocol.toUpperCase()} payment challenge`, async () => {
-    const originalFetch = globalThis.fetch;
-    const preimage = "11".repeat(32);
-    const paymentHash = "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc";
-    const requests = [];
-    const mppChallenge = {
-      id: "zq_test",
-      realm: "relay.zapptunnel.com",
-      method: "lightning",
-      intent: "charge",
-      request: "encoded-request",
-      expires: "2033-05-18T03:33:20Z"
-    };
-
-    globalThis.fetch = async (_url, init) => {
-      requests.push(init);
-      if (requests.length === 1) {
-        return new Response(
-          JSON.stringify({
-            amount_sats: 10,
-            claim_path: "/v1/payments/zq_test/claim",
-            claim_token: `zc_${"a".repeat(43)}`,
-            error: "payment_required",
-            expires_at: 2_000_000_000,
-            invoice: "lnbc10n1test",
-            l402_token: "signed-token",
-            mpp_challenge: mppChallenge,
-            payment_hash: paymentHash,
-            payment_protocols: ["mpp", "l402"],
-            quote_id: "zq_test"
-          }),
-          { status: 402, headers: { "content-type": "application/json" } }
-        );
-      }
-
-      return new Response(
-        JSON.stringify({ websocket_path: "/v1/connect/test", lease: "paid-lease" }),
-        { status: 201, headers: { "content-type": "application/json" } }
-      );
-    };
-
-    try {
-      await assert.rejects(
-        connect({
-          nodeId,
-          address: "node.example.com:9735",
-          rune: "readonly",
-          payment: { protocol, payInvoice: async () => preimage }
-        }),
-        (error) =>
-          error instanceof ZaptunnelError &&
-          (error.code === "connection_failed" || error.code === "connection_closed")
-      );
-
-      assert.equal(requests.length, 2);
-      const authorization = requests[1].headers.authorization;
-      if (protocol === "l402") {
-        assert.equal(authorization, `L402 signed-token:${preimage}`);
-      } else {
-        assert.match(authorization, /^Payment /);
-        const encoded = authorization.slice("Payment ".length).replaceAll("-", "+").replaceAll("_", "/");
-        const credential = JSON.parse(Buffer.from(encoded, "base64").toString());
-        assert.deepEqual(credential.challenge, mppChallenge);
-        assert.equal(credential.payload.preimage, preimage);
-      }
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-}
-
-test("SDK polls settlement when an external wallet does not return a preimage", async () => {
+test("SDK pays BOLT12 and polls relay-observed settlement", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
   const statuses = [];
@@ -713,18 +641,9 @@ test("SDK polls settlement when an external wallet does not return a preimage", 
           claim_token: `zc_${"b".repeat(43)}`,
           error: "payment_required",
           expires_at: 2_000_000_000,
-          invoice: "lnbc10n1external",
-          l402_token: "signed-token",
-          mpp_challenge: {
-            id: "zq_poll",
-            realm: "relay.zapptunnel.com",
-            method: "lightning",
-            intent: "charge",
-            request: "encoded-request",
-            expires: "2033-05-18T03:33:20Z"
-          },
+          invoice: "lni1external",
           payment_hash: "aa".repeat(32),
-          payment_protocols: ["mpp", "l402"],
+          protocol: "bolt12",
           quote_id: "zq_poll",
           retry_after_ms: 2_000
         }),
@@ -769,7 +688,7 @@ test("SDK polls settlement when an external wallet does not return a preimage", 
         address: "node.example.com:9735",
         rune: "readonly",
         payment: {
-          payInvoice: async () => undefined,
+          payInvoice: async () => ({ preimage: "ignored-by-design" }),
           store,
           onStatus: (status) => statuses.push(status)
         }
@@ -802,9 +721,9 @@ test("SDK recovers a saved external-wallet claim without requesting another paym
     challenge: {
       amountSats: 10,
       expiresAt: 2_000_000_000,
-      invoice: "lnbc10n1saved",
+      invoice: "lni1saved",
       paymentHash: "aa".repeat(32),
-      protocols: ["mpp", "l402"],
+      protocol: "bolt12",
       quoteId: "zq_saved"
     }
   };

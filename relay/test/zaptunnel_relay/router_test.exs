@@ -8,7 +8,6 @@ defmodule ZaptunnelRelay.RouterTest do
   alias ZaptunnelRelay.{
     Admission,
     EndpointVerifier,
-    PaymentProtocol,
     Payments,
     RateLimiter,
     Router
@@ -293,12 +292,7 @@ defmodule ZaptunnelRelay.RouterTest do
     refute_receive {:probe, _, _}
   end
 
-  test "offers and redeems both payment formats after free slots are occupied" do
-    preimage = String.duplicate("11", 32)
-
-    payment_hash =
-      :crypto.hash(:sha256, Base.decode16!(preimage, case: :lower)) |> Base.encode16(case: :lower)
-
+  test "offers only BOLT12 after free slots are occupied" do
     Application.put_env(:zaptunnel_relay, :payments_enabled, true)
     Application.put_env(:zaptunnel_relay, :free_sessions_per_node, 0)
     Application.put_env(:zaptunnel_relay, :invoice_provider, InvoiceProvider)
@@ -309,8 +303,9 @@ defmodule ZaptunnelRelay.RouterTest do
       :router_test_invoice,
       {:ok,
        %{
-         invoice: "lnbc1test",
-         payment_hash: payment_hash,
+         invoice: "lni1test",
+         offer_id: String.duplicate("aa", 32),
+         payment_hash: String.duplicate("11", 32),
          expires_at: System.system_time(:second) + 300
        }}
     )
@@ -318,31 +313,26 @@ defmodule ZaptunnelRelay.RouterTest do
     challenge = post_connection()
     body = Jason.decode!(challenge.resp_body)
     assert challenge.status == 402
-    assert body["payment_protocols"] == ["mpp", "l402"]
+    assert body["protocol"] == "bolt12"
+    refute Map.has_key?(body, "payment_protocols")
+    assert body["invoice"] == "lni1test"
     assert body["claim_path"] == "/v1/payments/#{body["quote_id"]}/claim"
     assert body["claim_token"] =~ ~r/^zc_/
-    assert length(get_resp_header(challenge, "www-authenticate")) == 2
+    assert get_resp_header(challenge, "www-authenticate") == []
     assert get_resp_header(challenge, "cache-control") == ["no-store"]
 
-    credential =
-      "Payment " <>
-        PaymentProtocol.encode(%{
-          "challenge" => body["mpp_challenge"],
-          "payload" => %{"preimage" => preimage}
-        })
-
-    paid =
+    legacy_credential =
       :post
-      |> conn("/v1/connections", Jason.encode!(%{node_id: @node_id, address: "127.0.0.1:9735"}))
+      |> conn(
+        "/v1/connections",
+        Jason.encode!(%{node_id: @node_id, address: "127.0.0.1:9735"})
+      )
       |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", credential)
+      |> put_req_header("authorization", "L402 obsolete-token:obsolete-preimage")
       |> Router.call([])
 
-    paid_body = Jason.decode!(paid.resp_body)
-    assert paid.status == 201
-    assert paid_body["lease"] =~ ~r/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
-    assert paid_body["websocket_path"] =~ ~r{^/v1/connect/}
-    assert [_receipt] = get_resp_header(paid, "payment-receipt")
+    assert legacy_credential.status == 402
+    assert %{"protocol" => "bolt12"} = Jason.decode!(legacy_credential.resp_body)
   end
 
   test "polls a protected claim until CLN settlement is observed" do
@@ -356,7 +346,8 @@ defmodule ZaptunnelRelay.RouterTest do
       :router_test_invoice,
       {:ok,
        %{
-         invoice: "lnbc1poll",
+         invoice: "lni1poll",
+         offer_id: String.duplicate("aa", 32),
          payment_hash: String.duplicate("11", 32),
          expires_at: System.system_time(:second) + 300
        }}
@@ -372,6 +363,7 @@ defmodule ZaptunnelRelay.RouterTest do
     assert :ok =
              Payments.record_settlement(%{
                label: body["quote_id"],
+               offer_id: String.duplicate("aa", 32),
                payment_hash: String.duplicate("11", 32),
                amount_received_msat: 10_000,
                paid_at: System.system_time(:second),

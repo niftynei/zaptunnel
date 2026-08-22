@@ -13,7 +13,8 @@ defmodule ZaptunnelRelay.SettlementWatcherTest do
     def create_invoice(opts) do
       {:ok,
        %{
-         invoice: "lnbc1watcher",
+         invoice: "lni1watcher",
+         offer_id: String.duplicate("aa", 32),
          payment_hash: ZaptunnelRelay.SettlementWatcherTest.payment_hash(),
          expires_at: System.system_time(:second) + Keyword.fetch!(opts, :expiry_seconds)
        }}
@@ -74,6 +75,7 @@ defmodule ZaptunnelRelay.SettlementWatcherTest do
         {:ok,
          %{
            label: challenge.quote_id,
+           offer_id: String.duplicate("aa", 32),
            payment_hash: @payment_hash,
            amount_received_msat: 10_000,
            paid_at: System.system_time(:second),
