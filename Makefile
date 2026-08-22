@@ -81,6 +81,7 @@ create: check-token register-key ## Create the droplet, firewall, and DNS record
 	@echo "  EXPECTED_SSH_HOST_KEY_SHA256=SHA256:... make trust-host"
 	@echo "  make wait-for-nixos"
 	@echo "  make pull-host-config"
+	@echo "  make install-acme-token"
 	@echo "  make deploy"
 
 provision: check-token ## Run the complete first-deployment workflow.
@@ -97,6 +98,7 @@ provision: check-token ## Run the complete first-deployment workflow.
 	fi
 	@$(MAKE) wait-for-nixos
 	@$(MAKE) pull-host-config
+	@$(MAKE) install-acme-token
 	@$(MAKE) deploy
 	@$(MAKE) smoke
 
@@ -176,8 +178,7 @@ verify-acme-token: check-ip ## Verify that the installed token can read the DO d
 		curl --config - --fail --silent --show-error https://api.digitalocean.com/v2/domains >/dev/null'
 	@echo "The installed DigitalOcean token is valid."
 
-deploy: check-ip ## Install secrets, build on the droplet, and activate Zaptunnel.
-	@$(MAKE) install-acme-token
+deploy: check-ip ## Verify installed secrets, build on the droplet, and activate Zaptunnel.
 	@$(MAKE) verify-acme-token
 	$(NIXOS_REBUILD) switch \
 		--flake path:.#zapptunnel \
@@ -185,7 +186,6 @@ deploy: check-ip ## Install secrets, build on the droplet, and activate Zaptunne
 		--build-host root@$(IP)
 
 deploy-local-build: check-ip ## Build locally, copy, and activate on the droplet.
-	@$(MAKE) install-acme-token
 	@$(MAKE) verify-acme-token
 	$(NIXOS_REBUILD) switch \
 		--flake path:.#zapptunnel \

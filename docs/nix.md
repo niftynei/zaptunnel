@@ -148,6 +148,10 @@ droplet, firewall, and DNS records, waits for `nixos-infect`, pulls the exact
 hardware/network configuration, installs the DNS-scoped DigitalOcean token for ACME,
 deploys the NixOS system, and runs public HTTPS smoke checks.
 
+Subsequent `make deploy` and `make deploy-local-build` runs verify and reuse the
+token already installed on the server. Run `make install-acme-token` explicitly
+only when provisioning a host or rotating the token.
+
 ACME requires `DIGITALOCEAN_DNS_TOKEN`; it never falls back to the full
 infrastructure token. Use a separate token restricted to DNS access.
 
